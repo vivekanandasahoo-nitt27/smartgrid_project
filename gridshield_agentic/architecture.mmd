@@ -1,0 +1,70 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	grid_monitoring(grid_monitoring)
+	classification(classification)
+	confidence_monitor(confidence_monitor)
+	high_confidence_attack(high_confidence_attack)
+	root_cause_analysis(root_cause_analysis)
+	event_reporting(event_reporting)
+	candidate_collection(candidate_collection)
+	below_threshold(below_threshold)
+	human_review(human_review)
+	record_excluded_sample(record_excluded_sample)
+	keep_pending_review(keep_pending_review)
+	data_admission(data_admission)
+	record_rejection(record_rejection)
+	dataset_management(dataset_management)
+	sample_threshold(sample_threshold)
+	retraining(retraining)
+	evaluation(evaluation)
+	evaluation_reporting(evaluation_reporting)
+	deployment_approval(deployment_approval)
+	retain_current_model(retain_current_model)
+	deployment(deployment)
+	record_deployment_outcome(record_deployment_outcome)
+	deployment_reporting(deployment_reporting)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> grid_monitoring;
+	candidate_collection --> data_admission;
+	classification --> confidence_monitor;
+	confidence_monitor -. &nbsp;below_attack_collection_threshold&nbsp; .-> below_threshold;
+	confidence_monitor -.-> high_confidence_attack;
+	confidence_monitor -.-> human_review;
+	confidence_monitor -. &nbsp;potential_new_attack&nbsp; .-> root_cause_analysis;
+	data_admission -. &nbsp;pending&nbsp; .-> __end__;
+	data_admission -. &nbsp;approved&nbsp; .-> dataset_management;
+	data_admission -. &nbsp;rejected&nbsp; .-> record_rejection;
+	dataset_management --> sample_threshold;
+	deployment --> record_deployment_outcome;
+	deployment_approval -. &nbsp;approved&nbsp; .-> deployment;
+	deployment_approval -. &nbsp;not_approved&nbsp; .-> retain_current_model;
+	evaluation --> evaluation_reporting;
+	evaluation_reporting -. &nbsp;passed&nbsp; .-> deployment_approval;
+	evaluation_reporting -. &nbsp;failed&nbsp; .-> retain_current_model;
+	event_reporting -. &nbsp;finish&nbsp; .-> __end__;
+	event_reporting -. &nbsp;collect_candidate&nbsp; .-> candidate_collection;
+	grid_monitoring --> classification;
+	high_confidence_attack --> event_reporting;
+	human_review -. &nbsp;pending_review&nbsp; .-> __end__;
+	human_review -. &nbsp;confirmed_attack&nbsp; .-> data_admission;
+	human_review -. &nbsp;unresolved&nbsp; .-> keep_pending_review;
+	human_review -. &nbsp;not_attack&nbsp; .-> record_excluded_sample;
+	record_deployment_outcome --> deployment_reporting;
+	retain_current_model --> record_deployment_outcome;
+	retraining --> evaluation;
+	root_cause_analysis --> event_reporting;
+	sample_threshold -. &nbsp;collect&nbsp; .-> __end__;
+	sample_threshold -. &nbsp;retrain&nbsp; .-> retraining;
+	below_threshold --> __end__;
+	deployment_reporting --> __end__;
+	keep_pending_review --> __end__;
+	record_excluded_sample --> __end__;
+	record_rejection --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
