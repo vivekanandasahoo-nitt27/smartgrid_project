@@ -1,0 +1,11 @@
+{
+  "event_id": "demo-review-test-row-00008",
+  "timestamp": "2026-10-12T17:55:56.832924+00:00",
+  "root_cause_findings": {},
+  "predicted_class": 0,
+  "attack_probability": 0.425,
+  "confidence_route": "human_review",
+  "root_cause_report": "No configured-limit violations or baseline comparisons were identified. This does not rule out an attack.",
+  "model_version": "unknown",
+  "report_status": "created"
+}
