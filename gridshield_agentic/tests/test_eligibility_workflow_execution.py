@@ -23,11 +23,11 @@ def test_approved_attack_reaches_eligibility_management(
         lambda state: {
             "predicted_class": 1,
             "class_probabilities": {
-                "healthy": 0.10,
-                "attack": 0.78,
-                "fault": 0.12,
+                "healthy": 0.25,
+                "attack": 0.50,
+                "fault": 0.25,
             },
-            "attack_probability": 0.78,
+            "attack_probability": 0.50,
         },
     )
 
@@ -90,8 +90,10 @@ def test_approved_attack_reaches_eligibility_management(
     )
 
     stored = repository.get("workflow-event-001")
-    assert stored is not None
-    assert stored["status"] == "eligible_for_training"
-    assert stored["eligible_for_training"] is True
-    assert repository.count_eligible() == 1
-    assert result["sample_eligible"] is True
+    
+    assert stored["status"] == "stored_pending_eligibility"
+    assert stored["eligible_for_training"] is False
+    assert repository.count_eligible() == 0
+    assert result["sample_eligible"] is False
+    assert result["eligibility_status"] == "awaiting_explicit_validation"
+

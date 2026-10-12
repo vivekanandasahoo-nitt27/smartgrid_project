@@ -8,7 +8,7 @@ from gridshield.routing import route_attack_probability
         (1.0, "high_confidence_attack"),
         (0.90, "high_confidence_attack"),
         (0.899, "potential_new_attack"),
-        (0.70, "potential_new_attack"),
+        (0.700, "potential_new_attack"),
         (0.699, "human_review"),
         (0.30, "human_review"),
         (0.299, "below_attack_collection_threshold"),

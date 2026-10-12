@@ -36,9 +36,11 @@ def test_eligibility_node_promotes_persisted_sample(
 
     result = agents.eligibility_management_node(state)
 
-    assert result["sample_eligible"] is True
-    assert result["candidate_sample"]["eligible_for_training"] is True
-    assert repository.count_eligible() == 1
+    
+    assert result["sample_eligible"] is False
+    assert result["eligibility_status"] == "awaiting_explicit_validation"
+    assert repository.count_eligible() == 0
+
 
 
 
@@ -115,6 +117,11 @@ def test_eligibility_node_is_idempotent(
         "candidate_sample": first["candidate_sample"],
     })
 
-    assert first["sample_eligible"] is True
-    assert second["sample_eligible"] is True
-    assert repository.count_eligible() == 1
+    
+    assert first["sample_eligible"] is False
+    assert second["sample_eligible"] is False
+    assert repository.count_eligible() == 0
+
+    assert first["eligibility_status"] == "awaiting_explicit_validation"
+    assert second["eligibility_status"] == "awaiting_explicit_validation"
+

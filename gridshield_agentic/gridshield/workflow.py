@@ -14,12 +14,11 @@ def choose_confidence_route(state: GridShieldState) -> str:
 
 
 def choose_after_event_report(state: GridShieldState) -> str:
-    """Route reviewable attack events into candidate collection."""
-    if state.get("confidence_route") in {
-        "potential_new_attack",
-        "human_review",
-    }:
+    """Only uncertain cases (0.30 <= P(attack) < 0.70) enter officer review."""
+    if state.get("confidence_route") == "human_review":
         return "collect_candidate"
+    # High-confidence and potential-new-attack routes continue automated
+    # investigation/reporting but do not create an officer-review candidate.
     return "finish"
 
 

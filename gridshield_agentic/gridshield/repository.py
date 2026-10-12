@@ -268,7 +268,15 @@ class PostgresSampleRepository:
                     )
                     VALUES (%s, %s, %s, %s, %s, FALSE,
                             %s, %s, %s)
-                    ON CONFLICT (event_id) DO NOTHING
+                    ON CONFLICT (event_id) DO UPDATE SET
+                        status = 'stored_pending_eligibility',
+                        human_review_status = 'confirmed_attack',
+                        human_verified_attack = TRUE,
+                        data_admission_status = 'approved'
+                    WHERE gridshield_attack_events.status IN ('awaiting_data_admission', 'awaiting_dataset_validation')
+                      AND gridshield_attack_events.human_review_status = 'confirmed_attack'
+                      AND gridshield_attack_events.human_verified_attack = TRUE
+                      AND gridshield_attack_events.eligible_for_training = FALSE
                     RETURNING *
                     """,
                     (
@@ -307,86 +315,201 @@ class PostgresSampleRepository:
                     "sample": self._row_to_sample(existing),
                 }
     def register_pending_review(self, sample):
-        """Persist a reviewable incident without admitting it to training."""
+        """Persist a review queue item, never eligible for training."""
         event_id = sample.get("event_id")
         measurements = sample.get("measurements")
         probability = sample.get("attack_probability")
-
         if not isinstance(event_id, str) or not event_id.strip():
             raise ValueError("A valid event_id is required")
         if not isinstance(measurements, dict) or not measurements:
             raise ValueError("Measurements are required")
-        if (
-            not isinstance(probability, (int, float))
-            or isinstance(probability, bool)
-            or not 0.0 <= probability <= 1.0
-        ):
+        if (not isinstance(probability, (int, float)) or isinstance(probability, bool)
+                or not 0.0 <= float(probability) <= 1.0):
             raise ValueError("A valid attack probability is required")
 
         from psycopg.rows import dict_row
         from psycopg.types.json import Jsonb
-
         with self._connect() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    """
+                cur.execute("""
                     INSERT INTO gridshield_attack_events (
                         event_id, measurements, attack_probability,
                         confidence_route, status, eligible_for_training,
                         human_review_status, human_verified_attack,
                         data_admission_status
-                    )
-                    VALUES (%s, %s, %s, %s, FALSE,
-                            'pending', FALSE, FALSE, 'pending')
+                    ) VALUES (%s, %s, %s, %s, 'awaiting_human_review',
+                              FALSE, 'pending', FALSE, 'pending')
                     ON CONFLICT (event_id) DO NOTHING
                     RETURNING *
-                    """,
-                    (
-                        event_id,
-                        Jsonb(measurements),
-                        float(probability),
-                        sample.get("confidence_route", "unknown"),
-                    ),
-                )
+                """, (event_id, Jsonb(measurements), float(probability),
+                      sample.get("confidence_route", "unknown")))
                 row = cur.fetchone()
-
+                inserted = row is not None
                 if row is None:
-                    cur.execute(
-                        """
-                        SELECT * FROM gridshield_attack_events
-                        WHERE event_id = %s
-                        """,
-                        (event_id,),
-                    )
+                    cur.execute("SELECT * FROM gridshield_attack_events WHERE event_id = %s", (event_id,))
                     row = cur.fetchone()
-
                 if row is None:
-                    raise RuntimeError("Could not persist pending incident")
+                    raise RuntimeError("Pending incident could not be persisted")
+                sample_row = self._row_to_sample(row)
+                if not inserted and not (
+                    sample_row.get("status") == "awaiting_human_review"
+                    and sample_row.get("human_review_status") == "pending"
+                ):
+                    raise ValueError(
+                        "event_id already exists outside the pending-review state; "
+                        "use a unique event_id for each incident"
+                    )
+                return {"inserted": inserted, "reason": "pending_review_created" if inserted else "duplicate_event_id",
+                        "sample": sample_row}
 
-                return self._row_to_sample(row)
-
-    def list_pending_reviews(self):
-        """Return incidents awaiting the first officer decision."""
+    def list_suspicious_events(self, *, min_confidence=0.30, max_confidence=0.70, limit=5000):
+        """List recent events strictly inside the supervisor-review confidence band."""
+        if not 0.0 <= min_confidence < max_confidence <= 1.0:
+            raise ValueError("Invalid confidence interval")
+        if not 1 <= limit <= 20000:
+            raise ValueError("Limit must be between 1 and 20000")
         from psycopg.rows import dict_row
-
         with self._connect() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM gridshield_attack_events
-                    WHERE human_review_status = 'pending'
-                        AND status = 'pending'
-                        AND human_verified_attack = FALSE
+                cur.execute("""
+                    SELECT * FROM gridshield_attack_events
+                    WHERE attack_probability > %s AND attack_probability < %s
+                      AND measurements IS NOT NULL
+                      AND measurements <> '{}'::jsonb
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                """, (min_confidence, max_confidence, limit))
+                return [self._row_to_sample(row) for row in cur.fetchall()]
+
+    def list_events_by_id_range(self, start_id, end_id, *, limit=5000):
+        """Find events whose trailing numeric event-ID suffix is in an inclusive range.
+
+        This supports IDs such as candidate-human-review-001 as well as numeric IDs.
+        If different prefixes share the same numeric suffix, all matching IDs are returned.
+        """
+        if isinstance(start_id, bool) or isinstance(end_id, bool):
+            raise ValueError("Event ID range bounds must be integers")
+        if not isinstance(start_id, int) or not isinstance(end_id, int):
+            raise ValueError("Event ID range bounds must be integers")
+        if start_id < 0 or end_id < start_id:
+            raise ValueError("Invalid event ID range")
+        if end_id - start_id > 100000:
+            raise ValueError("Requested event ID range is too large")
+        if not 1 <= limit <= 20000:
+            raise ValueError("Limit must be between 1 and 20000")
+        from psycopg.rows import dict_row
+        with self._connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("""
+                    SELECT * FROM gridshield_attack_events
+                    WHERE CASE
+                        WHEN event_id ~ '[0-9]+$'
+                        THEN substring(event_id from '([0-9]+)$')::NUMERIC
+                        ELSE NULL
+                    END BETWEEN %s AND %s
+                    ORDER BY created_at ASC, event_id ASC
+                    LIMIT %s
+                """, (start_id, end_id, limit))
+                return [self._row_to_sample(row) for row in cur.fetchall()]
+
+    def list_pending_reviews(self):
+        """List events waiting for the first officer's decision."""
+        from psycopg.rows import dict_row
+        with self._connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("""
+                    SELECT * FROM gridshield_attack_events
+                    WHERE status = 'awaiting_human_review'
+                      AND human_review_status = 'pending'
+                      AND confidence_route = 'human_review'
+                      AND eligible_for_training = FALSE
                     ORDER BY created_at ASC
-                    """
-                )
-                return [
-                    self._row_to_sample(row)
-                    for row in cur.fetchall()
-                ]
+                """)
+                return [self._row_to_sample(row) for row in cur.fetchall()]
 
+    def list_pending_admissions(self):
+        """List confirmed attacks awaiting the separate data-admission decision."""
+        from psycopg.rows import dict_row
+        with self._connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("""
+                    SELECT * FROM gridshield_attack_events
+                    WHERE status = 'awaiting_data_admission'
+                      AND human_review_status = 'confirmed_attack'
+                      AND human_verified_attack = TRUE
+                      AND data_admission_status = 'pending'
+                      AND eligible_for_training = FALSE
+                    ORDER BY created_at ASC
+                """)
+                return [self._row_to_sample(row) for row in cur.fetchall()]
 
+    def record_officer_decision(self, event_id, *, stage, decision, officer_username, thread_id):
+        """Persist a validated decision and append an immutable audit record."""
+        allowed = {
+            "attack_review": {"confirmed_attack", "not_attack", "unresolved", "pending_review"},
+            "data_admission": {"approved", "rejected"},
+        }
+        if stage not in allowed or decision not in allowed[stage]:
+            raise ValueError("Invalid decision for approval stage")
+        if not officer_username or not thread_id:
+            raise ValueError("Officer identity and workflow thread are required")
+        from psycopg.rows import dict_row
+        with self._connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT * FROM gridshield_attack_events WHERE event_id=%s FOR UPDATE", (event_id,))
+                row = cur.fetchone()
+                if row is None:
+                    raise ValueError("Incident not found")
+                if stage == "attack_review":
+                    if row["status"] != "awaiting_human_review" or row["human_review_status"] != "pending":
+                        raise ValueError("Incident is not awaiting attack verification")
+                    new_status = "awaiting_data_admission" if decision == "confirmed_attack" else (
+                        "review_unresolved" if decision in {"unresolved", "pending_review"} else "review_rejected")
+                    cur.execute("""UPDATE gridshield_attack_events
+                        SET human_review_status=%s, human_verified_attack=%s, status=%s
+                        WHERE event_id=%s RETURNING *""",
+                        (decision, decision == "confirmed_attack", new_status, event_id))
+                else:
+                    if (row["status"] != "awaiting_data_admission" or
+                        row["human_review_status"] != "confirmed_attack" or
+                        row["human_verified_attack"] is not True or
+                        row["data_admission_status"] != "pending"):
+                        raise ValueError("Incident is not awaiting data admission")
+                    new_status = "admission_rejected" if decision == "rejected" else "awaiting_dataset_validation"
+                    cur.execute("""UPDATE gridshield_attack_events
+                        SET data_admission_status=%s, status=%s
+                        WHERE event_id=%s RETURNING *""", (decision, new_status, event_id))
+                updated = cur.fetchone()
+                cur.execute("""CREATE TABLE IF NOT EXISTS gridshield_officer_audit (
+                    audit_id BIGSERIAL PRIMARY KEY,
+                    event_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    officer_username TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )""")
+                cur.execute("""INSERT INTO gridshield_officer_audit
+                    (event_id, stage, decision, officer_username, thread_id)
+                    VALUES (%s,%s,%s,%s,%s)""",
+                    (event_id, stage, decision, officer_username, thread_id))
+                return self._row_to_sample(updated)
+
+    def record_admission_persistence(self, event_id):
+        """Move an approved incident into the stored-but-ineligible state."""
+        from psycopg.rows import dict_row
+        with self._connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("""UPDATE gridshield_attack_events
+                    SET status='stored_pending_eligibility'
+                    WHERE event_id=%s AND status='awaiting_dataset_validation'
+                      AND human_review_status='confirmed_attack'
+                      AND human_verified_attack=TRUE AND data_admission_status='approved'
+                      AND eligible_for_training=FALSE RETURNING *""", (event_id,))
+                row = cur.fetchone()
+                if row is None:
+                    raise ValueError("Incident is not eligible for persistence")
+                return self._row_to_sample(row)
 
     def get(self, event_id):
         from psycopg.rows import dict_row

@@ -43,6 +43,7 @@ class GridShieldState(TypedDict, total=False):
     # Deployment remains a separate approval gate
     deployment_approval_status: str
     deployed_model_version: str
+    eligibility_status: str
 
 
     audit_events: list[dict[str, Any]]

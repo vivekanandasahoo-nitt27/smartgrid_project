@@ -1,0 +1,11 @@
+{
+  "event_id": "smoke-review-53f7368198a4",
+  "timestamp": "2026-10-11T17:11:56.053749+00:00",
+  "root_cause_findings": {},
+  "predicted_class": 1,
+  "attack_probability": 0.5,
+  "confidence_route": "human_review",
+  "root_cause_report": "No configured-limit violations or baseline comparisons were identified. This does not rule out an attack.",
+  "model_version": "unknown",
+  "report_status": "created"
+}
