@@ -50,8 +50,9 @@ def test_deployment_approval_interrupt_pauses_and_resumes():
     config = {"configurable": {"thread_id": "deployment-approval-test-001"}}
 
     initial_state = {
-        "candidate_model_version": "candidate-test-001",
-        "evaluation_status": "passed",
+    "candidate_model_version": "candidate-test-001",
+    "evaluation_status": "passed",
+    "event_id": "deployment-approval-test-001",
     }
 
     graph.invoke(initial_state, config=config)
@@ -60,7 +61,9 @@ def test_deployment_approval_interrupt_pauses_and_resumes():
     assert snapshot.interrupts, "Expected deployment approval interrupt"
 
     result = graph.invoke(
-        Command(resume={"decision": "rejected"}),
+        Command(resume={"decision": "rejected",
+    "officer_username": "test-officer",
+    "thread_id": "pytest-review",}),
         config=config,
     )
 

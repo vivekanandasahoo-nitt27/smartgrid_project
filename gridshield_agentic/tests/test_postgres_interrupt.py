@@ -53,7 +53,9 @@ def test_postgres_human_review_pause_and_resume_across_connections():
         )
 
         result = graph.invoke(
-            Command(resume={"decision": "confirmed_attack"}),
+            Command(resume={"decision": "confirmed_attack",
+    "officer_username": "test-officer",
+    "thread_id": "pytest-review",}),
             config=config,
         )
 

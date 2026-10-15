@@ -223,10 +223,43 @@ class PostgresSampleRepository:
 
         return sample
 
+    
     def admit(self, sample):
-        """Persist a validated sample as ineligible; deduplicate by event ID."""
+        """Persist a validated attack to incident and training tables."""
+
+        import math
+        from numbers import Real
+        from psycopg.rows import dict_row
+        from psycopg.sql import SQL, Identifier
+        from psycopg.types.json import Jsonb
+
+        feature_columns = [
+            "IED4_iA", "IED4_iB", "IED4_iC",
+            "MU1CurrentAngleA", "MU1CurrentAngleB", "MU1CurrentAngleC",
+            "MU1VoltageAngleA", "MU1VoltageAngleB", "MU1VoltageAngleC",
+            "MU2CurrentAngleA", "MU2CurrentAngleB", "MU2CurrentAngleC",
+            "MU2VoltageAngleA", "MU2VoltageAngleB", "MU2VoltageAngleC",
+            "MU3CurrentAngleA", "MU3CurrentAngleB", "MU3CurrentAngleC",
+            "MU3VoltageAngleA", "MU3VoltageAngleB", "MU3VoltageAngleC",
+            "MU4VoltageAngleA", "MU4VoltageAngleB", "MU4VoltageAngleC",
+            "consistency_1", "consistency_2", "consistency_3",
+            "frequencyMU1", "frequencyMU2", "frequencyMU3", "frequencyMU4",
+            "threePhaseCMUA2", "threePhaseCMUB2", "threePhaseCMUC2",
+            "threePhaseCMUA3", "threePhaseCMUB3", "threePhaseCMUC3",
+            "threePhaseCMUA4", "threePhaseCMUB4", "threePhaseCMUC4",
+            "threePhaseCSum_1", "threePhaseCSum_2", "threePhaseCSum_3",
+            "threePhaseCMUA1", "threePhaseCMUB1", "threePhaseCMUC1",
+            "threePhaseVMUA1", "threePhaseVMUB1", "threePhaseVMUC1",
+            "threePhaseVMUA2", "threePhaseVMUB2", "threePhaseVMUC2",
+            "threePhaseVMUA3", "threePhaseVMUB3", "threePhaseVMUC3",
+            "threePhaseVMUA4", "threePhaseVMUB4", "threePhaseVMUC4",
+            "threePhaseVSum_1", "threePhaseVSum_2", "threePhaseVSum_3",
+        ]
 
         event_id = sample.get("event_id")
+        measurements = sample.get("measurements")
+        probability = sample.get("attack_probability")
+
         if not isinstance(event_id, str) or not event_id.strip():
             raise ValueError("Sample requires a valid event_id")
 
@@ -234,48 +267,81 @@ class PostgresSampleRepository:
             raise ValueError("Sample has not passed dataset validation")
 
         if sample.get("eligible_for_training") is not False:
-            raise ValueError("Sample must not already be marked eligible")
+            raise ValueError("Sample must initially be ineligible")
 
-        measurements = sample.get("measurements")
-        if not isinstance(measurements, dict) or not measurements:
-            raise ValueError("Sample requires measurements")
+        if sample.get("human_review_status") != "confirmed_attack":
+            raise ValueError("Human confirmation is required")
 
-        probability = sample.get("attack_probability")
+        if sample.get("human_verified_attack") is not True:
+            raise ValueError("Human verification is required")
+
+        if sample.get("data_admission_status") != "approved":
+            raise ValueError("Data admission approval is required")
+
+        if not isinstance(measurements, dict):
+            raise ValueError("Measurements must be a dictionary")
+
+        missing = [c for c in feature_columns if c not in measurements]
+        extra = [c for c in measurements if c not in feature_columns]
+
+        if missing or extra:
+            raise ValueError(
+                f"Feature schema mismatch. Missing={missing}; extra={extra}"
+            )
+
+        values = []
+        for name in feature_columns:
+            value = measurements[name]
+            if (
+                not isinstance(value, Real)
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(f"Invalid numeric feature: {name}")
+            values.append(float(value))
+
         if (
-            not isinstance(probability, (int, float))
+            not isinstance(probability, Real)
             or isinstance(probability, bool)
-            or not 0.0 <= probability <= 1.0
+            or not math.isfinite(float(probability))
+            or not 0.0 <= float(probability) <= 1.0
         ):
             raise ValueError("Sample requires a valid attack probability")
 
-        from psycopg.types.json import Jsonb
-        from psycopg.rows import dict_row
+        feature_sql = SQL(", ").join(
+            Identifier(name) for name in feature_columns
+        )
+        placeholders = SQL(", ").join(
+            SQL("%s") for _ in feature_columns
+        )
 
         with self._connect() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
+                # First persist/update the existing incident record.
                 cur.execute(
                     """
                     INSERT INTO gridshield_attack_events (
-                        event_id,
-                        measurements,
-                        attack_probability,
-                        confidence_route,
-                        status,
-                        eligible_for_training,
-                        human_review_status,
-                        human_verified_attack,
+                        event_id, measurements, attack_probability,
+                        confidence_route, status, eligible_for_training,
+                        human_review_status, human_verified_attack,
                         data_admission_status
                     )
-                    VALUES (%s, %s, %s, %s, %s, FALSE,
-                            %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, 'stored_pending_eligibility',
+                            FALSE, 'confirmed_attack', TRUE, 'approved')
                     ON CONFLICT (event_id) DO UPDATE SET
                         status = 'stored_pending_eligibility',
                         human_review_status = 'confirmed_attack',
                         human_verified_attack = TRUE,
                         data_admission_status = 'approved'
-                    WHERE gridshield_attack_events.status IN ('awaiting_data_admission', 'awaiting_dataset_validation')
-                      AND gridshield_attack_events.human_review_status = 'confirmed_attack'
+                    WHERE gridshield_attack_events.status IN (
+                        'awaiting_data_admission',
+                        'awaiting_dataset_validation'
+                    )
+                      AND gridshield_attack_events.human_review_status =
+                          'confirmed_attack'
                       AND gridshield_attack_events.human_verified_attack = TRUE
+                      AND gridshield_attack_events.data_admission_status =
+                          'approved'
                       AND gridshield_attack_events.eligible_for_training = FALSE
                     RETURNING *
                     """,
@@ -284,36 +350,73 @@ class PostgresSampleRepository:
                         Jsonb(measurements),
                         float(probability),
                         sample.get("confidence_route", "unknown"),
-                        "stored_pending_eligibility",
-                        sample.get("human_review_status", "confirmed_attack"),
-                        sample.get("human_verified_attack", False),
-                        sample.get("data_admission_status", "approved"),
                     ),
                 )
                 row = cur.fetchone()
 
-                if row is not None:
+                if row is None:
+                    cur.execute(
+                        """
+                        SELECT * FROM gridshield_attack_events
+                        WHERE event_id = %s
+                        """,
+                        (event_id,),
+                    )
+                    existing = cur.fetchone()
+
                     return {
-                        "inserted": True,
-                        "reason": "stored_pending_eligibility",
-                        "sample": self._row_to_sample(row),
+                        "inserted": False,
+                        "reason": "duplicate_or_invalid_state",
+                        "sample": self._row_to_sample(existing),
                     }
 
-                # Return the existing record without overwriting it.
+                # Persist the 61 feature columns and label separately.
                 cur.execute(
-                    """
-                    SELECT * FROM gridshield_attack_events
-                    WHERE event_id = %s
-                    """,
-                    (event_id,),
+                    SQL("""
+                        INSERT INTO gridshield_new_training_data (
+                            event_id, label, {}, eligible_for_training
+                        )
+                        VALUES (%s, 1, {}, FALSE)
+                        ON CONFLICT (event_id) DO NOTHING
+                    """).format(feature_sql, placeholders),
+                    (event_id, *values),
                 )
-                existing = cur.fetchone()
+
+                inserted_training_row = cur.rowcount == 1
+
+                if not inserted_training_row:
+                    # Do not silently accept a conflicting duplicate.
+                    cur.execute(
+                        """
+                        SELECT label, eligible_for_training
+                        FROM gridshield_new_training_data
+                        WHERE event_id = %s
+                        """,
+                        (event_id,),
+                    )
+                    training_row = cur.fetchone()
+
+                    if training_row is None or training_row["label"] != 1:
+                        raise ValueError(
+                            "Conflicting training-table row for this event"
+                        )
+
+                    if training_row["eligible_for_training"]:
+                        raise ValueError(
+                            "Training row is already eligible; investigate "
+                            "the incident/training-table consistency"
+                        )
 
                 return {
-                    "inserted": False,
-                    "reason": "duplicate_event_id",
-                    "sample": self._row_to_sample(existing),
+                    "inserted": True,
+                    "reason": (
+                        "stored_pending_eligibility"
+                        if inserted_training_row
+                        else "training_row_already_stored"
+                    ),
+                    "sample": self._row_to_sample(row),
                 }
+
     def register_pending_review(self, sample):
         """Persist a review queue item, never eligible for training."""
         event_id = sample.get("event_id")
@@ -495,6 +598,38 @@ class PostgresSampleRepository:
                     (event_id, stage, decision, officer_username, thread_id))
                 return self._row_to_sample(updated)
 
+    def record_model_deployment_decision(
+        self, *, candidate_version, event_id, decision, officer_username,
+        thread_id, evaluation_report_path=""
+    ):
+        """Append an audit record for human candidate deployment approval."""
+        if decision not in {"approved", "rejected"}:
+            raise ValueError("Invalid model deployment decision")
+        if not all([candidate_version, event_id, officer_username, thread_id]):
+            raise ValueError("Candidate, event, officer, and thread identities are required")
+        from psycopg.rows import dict_row
+        with self._connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("""CREATE TABLE IF NOT EXISTS gridshield_model_deployment_audit (
+                    audit_id BIGSERIAL PRIMARY KEY,
+                    candidate_model_version TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    decision TEXT NOT NULL CHECK (decision IN ('approved','rejected')),
+                    officer_username TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    evaluation_report_path TEXT NOT NULL DEFAULT '',
+                    deployment_performed BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )""")
+                cur.execute("""INSERT INTO gridshield_model_deployment_audit
+                    (candidate_model_version, event_id, decision, officer_username,
+                     thread_id, evaluation_report_path, deployment_performed)
+                    VALUES (%s,%s,%s,%s,%s,%s,FALSE) RETURNING audit_id, created_at""",
+                    (candidate_version, event_id, decision, officer_username,
+                     thread_id, evaluation_report_path or ""))
+                return cur.fetchone()
+
+
     def record_admission_persistence(self, event_id):
         """Move an approved incident into the stored-but-ineligible state."""
         from psycopg.rows import dict_row
@@ -604,9 +739,30 @@ class PostgresSampleRepository:
                 if sample["status"] != "stored_pending_eligibility":
                     raise ValueError("Sample is not awaiting eligibility")
 
-                if sample["eligible_for_training"] is not False:
+                
+
+                
+                measurements = sample.get("measurements", {})
+                if not isinstance(measurements, dict):
+                    raise ValueError("Stored measurements are invalid")
+
+                cur.execute(
+                    """
+                    UPDATE gridshield_new_training_data
+                    SET eligible_for_training = TRUE
+                    WHERE event_id = %s
+                      AND label = 1
+                      AND eligible_for_training = FALSE
+                    RETURNING event_id
+                    """,
+                    (event_id,),
+                )
+
+                training_row = cur.fetchone()
+                if training_row is None:
                     raise ValueError(
-                        "Sample must be ineligible before promotion"
+                        "Training-table row is missing or is not awaiting "
+                        "eligibility; refusing promotion"
                     )
 
                 cur.execute(
@@ -628,6 +784,7 @@ class PostgresSampleRepository:
                         event_id,
                     ),
                 )
+
                 updated = self._row_to_sample(cur.fetchone())
 
                 return {
@@ -635,4 +792,5 @@ class PostgresSampleRepository:
                     "reason": "eligibility_approved",
                     "sample": updated,
                 }
+
 

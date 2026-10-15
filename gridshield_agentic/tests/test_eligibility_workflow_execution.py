@@ -2,21 +2,22 @@
 from langgraph.types import Command
 
 from gridshield import agents
-from gridshield.workflow import build_graph
 from gridshield.repository import JsonSampleRepository
+from gridshield.workflow import build_graph
 
 
 def test_approved_attack_reaches_eligibility_management(
     tmp_path, monkeypatch
 ):
     repository = JsonSampleRepository(tmp_path / "samples.json")
+
     monkeypatch.setattr(
         agents,
         "get_sample_repository",
         lambda: repository,
     )
 
-    # Use the real graph but deterministic test classification.
+    # Deterministic classification for this test.
     monkeypatch.setattr(
         agents,
         "classification_node",
@@ -64,36 +65,47 @@ def test_approved_attack_reaches_eligibility_management(
     graph = build_graph()
     config = {
         "configurable": {
-            "thread_id": "eligibility-workflow-test-001"
+            "thread_id": "eligibility-workflow-test-001",
         }
     }
 
-    initial_state = {}
-    paused = graph.invoke(initial_state, config=config)
+    # Start the workflow; it should pause for human review.
+    graph.invoke({}, config=config)
 
     snapshot = graph.get_state(config)
     assert snapshot.interrupts, "Expected human-review interrupt"
 
-    # Resume the first interrupt: confirm the attack.
+    # Approve the attack during human review.
     graph.invoke(
-        Command(resume={"decision": "confirmed_attack"}),
+        Command(
+            resume={
+                "decision": "confirmed_attack",
+                "officer_username": "test-officer",
+                "thread_id": "pytest-review",
+            }
+        ),
         config=config,
     )
 
+    # The workflow should pause for separate data-admission approval.
     snapshot = graph.get_state(config)
     assert snapshot.interrupts, "Expected data-admission interrupt"
 
-    # Resume the second interrupt: approve dataset admission.
-    result = graph.invoke(
-        Command(resume={"decision": "approved"}),
+    # Approve admission into the candidate training dataset.
+    graph.invoke(
+        Command(
+            resume={
+                "decision": "approved",
+                "officer_username": "test-officer",
+                "thread_id": "pytest-admission",
+            }
+        ),
         config=config,
     )
 
     stored = repository.get("workflow-event-001")
-    
-    assert stored["status"] == "stored_pending_eligibility"
-    assert stored["eligible_for_training"] is False
-    assert repository.count_eligible() == 0
-    assert result["sample_eligible"] is False
-    assert result["eligibility_status"] == "awaiting_explicit_validation"
 
+    assert stored is not None
+    assert stored["status"] == "eligible_for_training"
+    assert stored["eligible_for_training"] is True
+    assert repository.count_eligible() == 1

@@ -300,8 +300,9 @@ def candidate_collection_node(state):
 
 
 
+
 def human_review_node(state):
-    """Pause the graph until a human reviews the attack candidate."""
+    """Pause for human review and persist the officer's decision."""
 
     decision = interrupt({
         "request_type": "human_attack_review",
@@ -309,8 +310,8 @@ def human_review_node(state):
         "attack_probability": state["attack_probability"],
         "predicted_class": state["predicted_class"],
         "message": (
-            "Review this event and select one outcome: "
-            "confirmed_attack, not_attack, unresolved, or pending_review."
+            "Review this event: confirm attack, reject, unresolved, "
+            "or leave pending."
         ),
         "allowed_decisions": [
             "confirmed_attack",
@@ -324,25 +325,55 @@ def human_review_node(state):
         raise ValueError("Human-review response must be a dictionary")
 
     outcome = decision.get("decision")
+    officer = decision.get("officer_username")
+    thread_id = (
+        decision.get("thread_id")
+        or state.get("workflow_thread_id")
+        or state["event_id"]
+    )
 
-    allowed_outcomes = {
+    allowed = {
         "confirmed_attack",
         "not_attack",
         "unresolved",
         "pending_review",
     }
-
-    if outcome not in allowed_outcomes:
+    if outcome not in allowed:
         raise ValueError(f"Invalid human-review decision: {outcome!r}")
+
+    # Only persist decisions in the PostgreSQL workflow.
+    repository = get_sample_repository()
+    if isinstance(repository, PostgresSampleRepository):
+        if not officer or not str(officer).strip():
+            raise ValueError("officer_username is required for an audited decision")
+
+        stored = repository.record_officer_decision(
+            state["event_id"],
+            stage="attack_review",
+            decision=outcome,
+            officer_username=str(officer).strip(),
+            thread_id=str(thread_id),
+        )
+        persisted_status = stored["status"]
+    else:
+        persisted_status = (
+            "awaiting_data_admission"
+            if outcome == "confirmed_attack"
+            else "review_rejected"
+            if outcome == "not_attack"
+            else "review_unresolved"
+        )
 
     return {
         "human_review_status": outcome,
         "human_verified_attack": outcome == "confirmed_attack",
+        "repository_status": persisted_status,
         "audit_events": _audit(
             state,
             "human_review_completed",
             outcome=outcome,
-            officer_username=decision.get("officer_username"),
+            officer_username=officer,
+            repository_status=persisted_status,
         ),
     }
 
@@ -365,29 +396,30 @@ def high_confidence_node(state):
 
 
 
+
 def data_admission_node(state):
-    """Request separate admission approval for a human-confirmed attack."""
+    """Request separate admission approval and persist the decision."""
 
     candidate = state.get("candidate_sample")
     if not isinstance(candidate, dict):
         raise ValueError("Data admission requires a candidate sample")
 
     if state.get("human_review_status") != "confirmed_attack":
-        raise ValueError(
-            "Data admission requires human confirmation of the attack"
-        )
+        raise ValueError("Human confirmation is required")
 
     if state.get("human_verified_attack") is not True:
-        raise ValueError("Human verification flag is missing or false")
+        raise ValueError("Human verification is required")
 
     if candidate.get("event_id") != state.get("event_id"):
-        raise ValueError("Candidate event ID does not match the current event")
+        raise ValueError("Candidate event ID mismatch")
 
     decision = interrupt({
         "request_type": "data_admission",
         "event_id": state["event_id"],
         "attack_probability": state["attack_probability"],
-        "message": "Approve or reject this confirmed attack for dataset admission?",
+        "message": (
+            "Approve or reject this confirmed incident for dataset admission?"
+        ),
         "allowed_decisions": ["approved", "rejected"],
     })
 
@@ -395,24 +427,47 @@ def data_admission_node(state):
         raise ValueError("Data-admission response must be a dictionary")
 
     outcome = decision.get("decision")
-
-    if outcome == "approved":
-        status = "approved"
-    elif outcome == "rejected":
-        status = "rejected"
-    else:
+    if outcome not in {"approved", "rejected"}:
         raise ValueError(f"Invalid data-admission decision: {outcome!r}")
 
+    officer = decision.get("officer_username")
+    thread_id = (
+        decision.get("thread_id")
+        or state.get("workflow_thread_id")
+        or state["event_id"]
+    )
+
+    repository = get_sample_repository()
+    if isinstance(repository, PostgresSampleRepository):
+        if not officer or not str(officer).strip():
+            raise ValueError("officer_username is required for an audited decision")
+
+        stored = repository.record_officer_decision(
+            state["event_id"],
+            stage="data_admission",
+            decision=outcome,
+            officer_username=str(officer).strip(),
+            thread_id=str(thread_id),
+        )
+        persisted_status = stored["status"]
+    else:
+        persisted_status = (
+            "awaiting_dataset_validation"
+            if outcome == "approved"
+            else "admission_rejected"
+        )
+
     return {
-        "data_admission_status": status,
-        # Approval is not the same as dataset eligibility.
+        "data_admission_status": outcome,
         "sample_eligible": False,
+        "repository_status": persisted_status,
         "audit_events": _audit(
             state,
             "data_admission_decided",
             event_id=state["event_id"],
-            outcome=status,
-            officer_username=decision.get("officer_username"),
+            outcome=outcome,
+            officer_username=officer,
+            repository_status=persisted_status,
         ),
     }
 
@@ -425,76 +480,113 @@ from numbers import Real
 
 
 
+
+
 def dataset_management_node(state):
-    """Validate and persist an approved candidate without promoting eligibility."""
+    """Validate and persist a candidate while keeping it ineligible."""
+
+    import math
+    from numbers import Real
 
     candidate = state.get("candidate_sample")
-
     if not isinstance(candidate, dict):
         raise ValueError("Candidate sample is missing")
 
-    if state.get("human_review_status") != "confirmed_attack":
-        raise ValueError("Dataset admission requires a confirmed attack")
-
-    if state.get("human_verified_attack") is not True:
-        raise ValueError("Human verification is missing")
-
-    if state.get("data_admission_status") != "approved":
-        raise ValueError("Candidate has not been approved for admission")
-
     event_id = state.get("event_id")
-
     if not event_id or candidate.get("event_id") != event_id:
         raise ValueError("Candidate event ID mismatch")
 
+    if (
+        state.get("human_review_status") != "confirmed_attack"
+        or state.get("human_verified_attack") is not True
+        or state.get("data_admission_status") != "approved"
+    ):
+        raise ValueError("Required human approvals are missing")
+
     measurements = candidate.get("measurements")
-
     if not isinstance(measurements, dict) or not measurements:
-        raise ValueError("Candidate measurements are missing")
+        raise ValueError("Measurements must be a non-empty dictionary")
 
-    invalid_features = [
-        name
-        for name, value in measurements.items()
+    validated = {}
+    for name, value in measurements.items():
         if (
             not isinstance(name, str)
-            or not name.strip()
             or not isinstance(value, Real)
             or isinstance(value, bool)
             or not math.isfinite(float(value))
-        )
-    ]
+        ):
+            raise ValueError(f"Invalid numeric feature: {name!r}")
+        validated[name] = float(value)
 
-    if invalid_features:
-        raise ValueError(f"Invalid measurement features: {invalid_features}")
+    probability = candidate.get("attack_probability", state.get("attack_probability"))
+    if (
+        not isinstance(probability, Real)
+        or isinstance(probability, bool)
+        or not math.isfinite(float(probability))
+        or not 0.0 <= float(probability) <= 1.0
+    ):
+        raise ValueError("Candidate requires a valid attack probability")
 
-    # Prepare a validated record for persistence.
+    repository = get_sample_repository()
+
+    # PostgreSQL is the production path and must match the active model schema.
+    if isinstance(repository, PostgresSampleRepository):
+        import pickle
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        schema_path = root / "artifacts" / "feature_columns3.pkl"
+
+        with schema_path.open("rb") as file:
+            feature_columns = list(pickle.load(file))
+
+        if len(feature_columns) != 61 or len(set(feature_columns)) != 61:
+            raise ValueError("Expected exactly 61 unique model features")
+
+        missing = [name for name in feature_columns if name not in validated]
+        extra = [name for name in validated if name not in feature_columns]
+        if missing or extra:
+            raise ValueError(
+                f"Feature schema mismatch. Missing={missing}; extra={extra}"
+            )
+
+        validated = {name: validated[name] for name in feature_columns}
+
     validated_candidate = {
         **candidate,
+        "event_id": event_id,
+        "measurements": validated,
+        "attack_probability": float(probability),
         "status": "validated_pending_persistence",
+        "human_review_status": "confirmed_attack",
+        "human_verified_attack": True,
+        "data_admission_status": "approved",
         "eligible_for_training": False,
     }
 
-    repository = get_sample_repository()
     result = repository.admit(validated_candidate)
+    stored = result.get("sample")
 
-    inserted = result["inserted"]
-    stored_sample = result["sample"]
+    if not stored:
+        raise RuntimeError("Repository did not return a persisted sample")
 
-    # Do not overwrite an existing sample with a duplicate.
+    if stored.get("eligible_for_training") is not False:
+        raise RuntimeError("Newly persisted sample must remain ineligible")
+
     return {
-        "candidate_sample": stored_sample,
-        "repository_inserted": inserted,
+        "candidate_sample": stored,
+        "repository_inserted": result["inserted"],
         "repository_status": result["reason"],
+        "dataset_validation_status": "passed",
         "sample_eligible": False,
         "audit_events": _audit(
             state,
-            "dataset_sample_persisted" if inserted else "duplicate_sample_detected",
+            "dataset_sample_validated_and_persisted",
             event_id=event_id,
-            inserted=inserted,
+            inserted=result["inserted"],
             repository_status=result["reason"],
         ),
     }
-
 
 
 
@@ -558,16 +650,7 @@ def eligibility_management_node(state):
                 event_id=event_id,
             ),
         }
-        return {
-            "candidate_sample": persisted_sample,
-            "sample_eligible": True,
-            "eligibility_status": "already_eligible",
-            "audit_events": _audit(
-                state,
-                "sample_eligibility_already_granted",
-                event_id=event_id,
-            ),
-        }
+        
 
     if (
         persisted_sample.get("status") != "stored_pending_eligibility"
@@ -621,8 +704,10 @@ def sample_threshold_node(state):
 
 
 
+
 def retraining_node(state):
-    """Train an isolated candidate only when trusted training data is available."""
+    """Train an isolated candidate using at least 100 eligible attack samples."""
+
     import joblib
     import pandas as pd
     from datetime import datetime, timezone
@@ -631,6 +716,7 @@ def retraining_node(state):
     repository = get_sample_repository()
     eligible_count = repository.count_eligible()
 
+    # Gate 1: Never retrain below the required threshold.
     if eligible_count < 100:
         return {
             "training_run_id": None,
@@ -644,80 +730,204 @@ def retraining_node(state):
             ),
         }
 
-    # A trusted, labelled baseline dataset is required because the current
-    # approval workflow supplies confirmed attack samples with label 1 only.
+    # Gate 2: Require trusted baseline feature and label files.
     x_path = state.get("training_dataset_path")
     y_path = state.get("training_label_path")
 
     if not x_path or not y_path:
         return {
             "training_run_id": None,
-            "retraining_status": "ready_for_training",
+            "retraining_status": "blocked_missing_training_paths",
             "eligible_attack_sample_count": eligible_count,
+            "training_error": (
+                "Trusted baseline feature and label paths are required."
+            ),
             "audit_events": _audit(
                 state,
-                "retraining_gate_passed",
+                "retraining_blocked",
                 eligible_count=eligible_count,
                 required_count=100,
-                note="Threshold passed; trusted training data paths not supplied.",
+                reason="missing_training_paths",
             ),
-    }
+        }
 
     try:
         base_dir = Path(__file__).resolve().parents[1]
-        active_features_path = base_dir / "artifacts" / "feature_columns3.pkl"
-        if not active_features_path.exists():
+
+        # Load the active feature schema.
+        feature_path = base_dir / "artifacts" / "feature_columns3.pkl"
+
+        if not feature_path.exists():
             raise FileNotFoundError(
-                f"Active feature metadata not found: {active_features_path}"
+                f"Feature schema not found: {feature_path}"
             )
 
-        feature_columns = list(joblib.load(active_features_path))
+        feature_columns = list(joblib.load(feature_path))
+
+        if len(feature_columns) != 61 or len(set(feature_columns)) != 61:
+            raise ValueError(
+                "Expected exactly 61 unique active model features."
+            )
+
+        # Load the trusted baseline dataset.
         X_base = pd.read_csv(x_path)
         y_frame = pd.read_csv(y_path)
 
-        if len(y_frame.columns) != 1:
-            raise ValueError("Training labels file must have exactly one column.")
-        if X_base.empty or len(X_base) != len(y_frame):
-            raise ValueError("Training data is empty or feature/label counts differ.")
-        if list(X_base.columns) != feature_columns:
-            raise ValueError("Training features do not match the active feature schema.")
-        if X_base.isna().any().any() or y_frame.isna().any().any():
-            raise ValueError("Training data contains missing values.")
+        if X_base.empty:
+            raise ValueError("Baseline training features are empty.")
 
-        y_base = y_frame.iloc[:, 0].astype(int)
+        if len(X_base) != len(y_frame):
+            raise ValueError(
+                "Baseline feature and label row counts do not match."
+            )
+
+        if list(X_base.columns) != feature_columns:
+            raise ValueError(
+                "Baseline feature names or ordering do not match the model."
+            )
+
+        if len(y_frame.columns) != 1:
+            raise ValueError(
+                "The baseline label file must contain exactly one column."
+            )
+
+        if X_base.isna().any().any() or y_frame.isna().any().any():
+            raise ValueError("Baseline training data contains missing values.")
+
+        # Reject non-numeric and non-finite feature values.
+        try:
+            X_base_numeric = X_base.to_numpy(dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Baseline features must all be numeric."
+            ) from exc
+
+        if not np.isfinite(X_base_numeric).all():
+            raise ValueError(
+                "Baseline features contain non-finite values."
+            )
+
+        X_base = pd.DataFrame(
+            X_base_numeric,
+            columns=feature_columns,
+        )
+
+        # Validate labels without silently truncating decimals.
+        try:
+            y_numeric = pd.to_numeric(
+                y_frame.iloc[:, 0],
+                errors="raise",
+            ).to_numpy(dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Baseline labels must be numeric."
+            ) from exc
+
+        if not np.isfinite(y_numeric).all():
+            raise ValueError("Baseline labels contain non-finite values.")
+
+        if not np.equal(y_numeric, np.floor(y_numeric)).all():
+            raise ValueError("Baseline labels must be integers.")
+
+        y_base = pd.Series(
+            y_numeric.astype(int),
+            name=y_frame.columns[0],
+        )
+
         required_classes = {0, 1, 2}
+
         if set(y_base.unique()) != required_classes:
             raise ValueError(
-                "Trusted baseline training data must contain classes 0, 1, and 2."
+                "Baseline must contain classes 0, 1, and 2."
             )
 
+        # Load only samples eligible in both PostgreSQL tables.
         eligible_samples = repository.list_eligible()
-        attack_rows = []
-        for sample in eligible_samples:
-            measurements = sample.get("measurements", {})
-            if sample.get("verified_label") != 1:
-                continue
-            missing = [c for c in feature_columns if c not in measurements]
-            if missing:
-                raise ValueError(
-                    f"Eligible sample {sample.get('event_id')} is missing features: {missing}"
-                )
-            attack_rows.append([measurements[c] for c in feature_columns])
 
-        if len(attack_rows) < 100:
+        if len(eligible_samples) < 100:
             raise ValueError(
-                "Fewer than 100 valid eligible attack samples were retrieved."
+                "Fewer than 100 eligible samples were retrieved."
             )
 
-        X_attack = pd.DataFrame(attack_rows, columns=feature_columns)
-        y_attack = pd.Series([1] * len(X_attack), name=y_frame.columns[0])
+        attack_rows = []
 
-        X_train = pd.concat([X_base, X_attack], ignore_index=True)
-        y_train = pd.concat([y_base, y_attack], ignore_index=True)
+        for sample in eligible_samples:
+            if sample.get("verified_label") != 1:
+                raise ValueError(
+                    f"Invalid verified label for event {sample.get('event_id')}."
+                )
+
+            measurements = sample.get("measurements")
+
+            if not isinstance(measurements, dict):
+                raise ValueError(
+                    f"Invalid measurements for event {sample.get('event_id')}."
+                )
+
+            missing = [
+                name for name in feature_columns
+                if name not in measurements
+            ]
+            extra = [
+                name for name in measurements
+                if name not in feature_columns
+            ]
+
+            if missing or extra:
+                raise ValueError(
+                    f"Feature schema mismatch for {sample.get('event_id')}. "
+                    f"Missing={missing}; extra={extra}"
+                )
+
+            attack_rows.append([
+                measurements[name] for name in feature_columns
+            ])
+
+        # Validate all incoming attack feature values.
+        try:
+            X_attack_numeric = np.asarray(attack_rows, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Eligible attack features must all be numeric."
+            ) from exc
+
+        if X_attack_numeric.shape != (
+            len(attack_rows), len(feature_columns)
+        ):
+            raise ValueError("Eligible attack feature dimensions are invalid.")
+
+        if not np.isfinite(X_attack_numeric).all():
+            raise ValueError(
+                "Eligible attack samples contain non-finite values."
+            )
+
+        X_attack = pd.DataFrame(
+            X_attack_numeric,
+            columns=feature_columns,
+        )
+
+        y_attack = pd.Series(
+            [1] * len(X_attack),
+            name=y_base.name,
+            dtype=int,
+        )
+
+        # Combine baseline data with newly eligible attack samples.
+        X_train = pd.concat(
+            [X_base, X_attack],
+            ignore_index=True,
+        )
+        y_train = pd.concat(
+            [y_base, y_attack],
+            ignore_index=True,
+        )
 
         if set(y_train.unique()) != required_classes:
-            raise ValueError("Combined training data lacks required classes.")
+            raise ValueError(
+                "Combined training data must contain classes 0, 1, and 2."
+            )
 
+        # Train an isolated candidate; do not replace the active model.
         model = RandomForestClassifier(
             n_estimators=300,
             min_samples_split=20,
@@ -729,37 +939,46 @@ def retraining_node(state):
             random_state=42,
             n_jobs=-1,
         )
+
         model.fit(X_train, y_train)
 
-        run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        run_id = datetime.now(timezone.utc).strftime(
+            "%Y%m%dT%H%M%S%fZ"
+        )
+
         candidate_dir = base_dir / "artifacts" / "candidates"
         candidate_dir.mkdir(parents=True, exist_ok=True)
 
-        model_path = candidate_dir / f"gridshield_candidate_{run_id}.pkl"
-        feature_path = candidate_dir / f"feature_columns_{run_id}.pkl"
+        candidate_model_path = (
+            candidate_dir / f"gridshield_candidate_{run_id}.pkl"
+        )
+        candidate_features_path = (
+            candidate_dir / f"feature_columns_{run_id}.pkl"
+        )
 
-        # Write only new candidate artifacts; active model files remain untouched.
-        joblib.dump(model, model_path)
-        joblib.dump(feature_columns, feature_path)
+        joblib.dump(model, candidate_model_path)
+        joblib.dump(feature_columns, candidate_features_path)
 
         return {
             "training_run_id": run_id,
+            "candidate_model_version": run_id,
             "retraining_status": "candidate_trained_pending_evaluation",
-            "eligible_attack_sample_count": len(attack_rows),
-            "candidate_model_path": str(model_path),
-            "candidate_feature_columns_path": str(feature_path),
+            "eligible_attack_sample_count": len(X_attack),
+            "candidate_model_path": str(candidate_model_path),
+            "candidate_feature_columns_path": str(candidate_features_path),
             "audit_events": _audit(
                 state,
                 "candidate_model_trained",
                 training_run_id=run_id,
-                eligible_attack_sample_count=len(attack_rows),
+                eligible_attack_sample_count=len(X_attack),
                 training_sample_count=len(X_train),
-                candidate_model_path=str(model_path),
+                candidate_model_path=str(candidate_model_path),
             ),
         }
 
     except Exception as exc:
         reason = f"{type(exc).__name__}: {exc}"
+
         return {
             "training_run_id": None,
             "retraining_status": "candidate_training_failed",
@@ -771,7 +990,6 @@ def retraining_node(state):
                 reason=reason,
             ),
         }
-
 
 
 
@@ -951,9 +1169,15 @@ def evaluate_candidate_metrics_node(state):
 
 
 
+
 def evaluation_report_node(state):
-    """Apply explicit candidate acceptance rules and persist the report."""
+    """Apply acceptance thresholds and save a candidate evaluation report."""
     import json
+    import math
+    from dotenv import load_dotenv
+
+    project_root = Path(__file__).resolve().parents[1]
+    load_dotenv(project_root / ".env")
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -961,18 +1185,30 @@ def evaluation_report_node(state):
     labels = state.get("evaluation_class_labels") or []
     original_status = state.get("evaluation_status", "not_run")
 
-    min_accuracy = float(os.getenv("GRIDSHIELD_MIN_ACCURACY", "0.90"))
-    min_macro_f1 = float(os.getenv("GRIDSHIELD_MIN_MACRO_F1", "0.85"))
-    min_class_recall = float(
-        os.getenv("GRIDSHIELD_MIN_CLASS_RECALL", "0.80")
-    )
+    # Invalid configuration must fail closed; never approve on bad settings.
+    try:
+        min_accuracy = float(os.getenv("GRIDSHIELD_MIN_ACCURACY", "0.90"))
+        min_macro_f1 = float(os.getenv("GRIDSHIELD_MIN_MACRO_F1", "0.85"))
+        min_class_recall = float(
+            os.getenv("GRIDSHIELD_MIN_CLASS_RECALL", "0.80")
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Evaluation thresholds must be numeric.") from exc
+
+    thresholds = (min_accuracy, min_macro_f1, min_class_recall)
+    if not all(math.isfinite(x) and 0.0 <= x <= 1.0 for x in thresholds):
+        raise ValueError("Evaluation thresholds must be finite values from 0 to 1.")
 
     reasons = []
 
+    # The metrics node is expected to return pending_policy when it has
+    # successfully calculated metrics. This function applies the policy.
     if original_status == "error":
         reasons.append("Candidate evaluation failed.")
-    elif original_status not in {"pending_policy", "passed"}:
-        reasons.append(f"Unexpected evaluation status: {original_status}")
+    elif original_status != "pending_policy":
+        reasons.append(
+            f"Unexpected evaluation status: {original_status}"
+        )
 
     if set(labels) != {0, 1, 2}:
         reasons.append("Evaluation must cover classes 0, 1, and 2.")
@@ -983,12 +1219,20 @@ def evaluation_report_node(state):
     recalls = metrics.get("recall_per_class") or {}
     supports = metrics.get("support_per_class") or {}
 
-    if not isinstance(accuracy, (int, float)) or not 0 <= accuracy <= 1:
+    if (
+        not isinstance(accuracy, (int, float))
+        or not math.isfinite(float(accuracy))
+        or not 0.0 <= accuracy <= 1.0
+    ):
         reasons.append("Valid accuracy metric is missing.")
     elif accuracy < min_accuracy:
         reasons.append(f"Accuracy is below {min_accuracy:.0%}.")
 
-    if not isinstance(macro_f1, (int, float)) or not 0 <= macro_f1 <= 1:
+    if (
+        not isinstance(macro_f1, (int, float))
+        or not math.isfinite(float(macro_f1))
+        or not 0.0 <= macro_f1 <= 1.0
+    ):
         reasons.append("Valid macro F1 metric is missing.")
     elif macro_f1 < min_macro_f1:
         reasons.append(f"Macro F1 is below {min_macro_f1:.0%}.")
@@ -997,25 +1241,34 @@ def evaluation_report_node(state):
         recall = recalls.get(str(label))
         support = supports.get(str(label), 0)
 
-        if not isinstance(support, int) or support <= 0:
+        if not isinstance(support, (int, float)) or support <= 0:
             reasons.append(f"Class {label} has no evaluation examples.")
-        if not isinstance(recall, (int, float)) or not 0 <= recall <= 1:
+
+        if (
+            not isinstance(recall, (int, float))
+            or not math.isfinite(float(recall))
+            or not 0.0 <= recall <= 1.0
+        ):
             reasons.append(f"Valid recall for class {label} is missing.")
         elif recall < min_class_recall:
             reasons.append(
-                f"Recall for class {label} is below {min_class_recall:.0%}."
+                f"Recall for class {label} is below "
+                f"{min_class_recall:.0%}."
             )
 
-    evaluation_status = (
-    "pending_policy"
-    if original_status == "pending_policy"
-    else ("failed" if reasons else "passed")
-    )
+    # This is the key fix: apply the thresholds and produce a final result.
+    evaluation_status = "failed" if reasons else "passed"
 
     report = {
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "candidate_model_version": state.get("candidate_model_version"),
+        "candidate_model_version": (
+            state.get("candidate_model_version")
+            or state.get("training_run_id")
+        ),
         "training_run_id": state.get("training_run_id"),
+        "event_id": state.get("event_id"),
+        "candidate_model_path": state.get("candidate_model_path"),
+        "candidate_feature_columns_path": state.get("candidate_feature_columns_path"),
         "evaluation_status": evaluation_status,
         "class_labels": labels,
         "confusion_matrix": state.get("confusion_matrix", []),
@@ -1032,10 +1285,11 @@ def evaluation_report_node(state):
         ),
     }
 
-    version = state.get("candidate_model_version") or state.get(
-        "training_run_id"
-    ) or "candidate"
-
+    version = (
+        state.get("candidate_model_version")
+        or state.get("training_run_id")
+        or "candidate"
+    )
     report_path = REPORT_DIR / f"evaluation_{version}.json"
     report_path.write_text(
         json.dumps(report, indent=2),
@@ -1063,19 +1317,63 @@ def lifecycle_reporting_node(state):
 
 
 def deployment_approval_node(state):
+    """Pause for human review only after the candidate passes policy."""
+    if state.get("evaluation_status") != "passed":
+        return {
+            "deployment_approval_status": "blocked_evaluation_not_passed",
+            "audit_events": _audit(
+                state,
+                "deployment_approval_blocked",
+                reason="candidate_evaluation_not_passed",
+            ),
+        }
+
+    version = state.get("candidate_model_version") or state.get("training_run_id")
+    event_id = state.get("event_id")
+    if not version or not event_id:
+        return {
+            "deployment_approval_status": "blocked_missing_candidate_identity",
+            "audit_events": _audit(
+                state,
+                "deployment_approval_blocked",
+                reason="missing_candidate_version_or_event_id",
+            ),
+        }
+
     decision = interrupt({
         "request_type": "model_deployment",
-        "candidate_model_version": state["candidate_model_version"],
-        "evaluation_status": state["evaluation_status"],
-        "message": "Approve or reject this candidate model deployment?",
+        "event_id": event_id,
+        "thread_id": event_id,
+        "candidate_model_version": version,
+        "evaluation_status": state.get("evaluation_status"),
+        "evaluation_report_path": state.get("evaluation_report_path"),
+        "candidate_model_path": state.get("candidate_model_path"),
+        "message": "Candidate passed evaluation. Human approval is required; approval does not activate the model.",
     })
 
+    if not isinstance(decision, dict):
+        raise ValueError("Invalid deployment decision payload")
     if decision.get("decision") == "approved":
-        return {"deployment_approval_status": "approved"}
-
+        return {
+            "deployment_approval_status": "approved",
+            "deployment_approval_officer": decision.get("officer_username"),
+            "audit_events": _audit(
+                state, "candidate_deployment_approved",
+                candidate_model_version=version,
+                officer_username=decision.get("officer_username"),
+                deployment_performed=False,
+            ),
+        }
     if decision.get("decision") == "rejected":
-        return {"deployment_approval_status": "rejected"}
-
+        return {
+            "deployment_approval_status": "rejected",
+            "deployment_approval_officer": decision.get("officer_username"),
+            "audit_events": _audit(
+                state, "candidate_deployment_rejected",
+                candidate_model_version=version,
+                officer_username=decision.get("officer_username"),
+            ),
+        }
     raise ValueError("Invalid deployment decision")
 
 
@@ -1087,11 +1385,25 @@ def retain_current_model_node(state):
     }
 
 
+
 def deployment_node(state):
-    # Safe deployment/rollback mechanics will be implemented and tested later.
+    """Fail safely until real deployment and rollback are implemented."""
+
     return {
-        "audit_events": _audit(state, "deployment_placeholder"),
+        "deployment_status": "not_implemented",
+        "deployment_approval_status": "approved_but_not_deployed",
+        "deployed_model_version": None,
+        "audit_events": _audit(
+            state,
+            "deployment_blocked_not_implemented",
+            candidate_model_version=(
+                state.get("candidate_model_version")
+                or state.get("training_run_id")
+            ),
+            reason="safe_deployment_and_rollback_not_implemented",
+        ),
     }
+
 
 
 def record_deployment_outcome_node(state):

@@ -4,12 +4,8 @@ import json
 from gridshield.agents import evaluation_report_node
 
 
-def test_evaluation_report_persists_metrics(tmp_path, monkeypatch):
-    import gridshield.agents as agents
-
-    monkeypatch.setattr(agents, "REPORT_DIR", tmp_path)
-
-    state = {
+def _valid_state():
+    return {
         "candidate_model_version": "candidate-v1",
         "training_run_id": "run-test-1",
         "evaluation_status": "pending_policy",
@@ -21,39 +17,100 @@ def test_evaluation_report_persists_metrics(tmp_path, monkeypatch):
         ],
         "evaluation_metrics": {
             "accuracy": 1.0,
+            "macro_average": {"f1_score": 1.0},
+            "recall_per_class": {
+                "0": 1.0,
+                "1": 1.0,
+                "2": 1.0,
+            },
+            "support_per_class": {
+                "0": 2,
+                "1": 2,
+                "2": 2,
+            },
             "test_sample_count": 6,
         },
         "audit_events": [],
     }
 
-    result = evaluation_report_node(state)
+
+def test_evaluation_report_passes_and_persists_metrics(
+    tmp_path, monkeypatch
+):
+    import gridshield.agents as agents
+
+    monkeypatch.setattr(agents, "REPORT_DIR", tmp_path)
+    monkeypatch.setenv("GRIDSHIELD_MIN_ACCURACY", "0.90")
+    monkeypatch.setenv("GRIDSHIELD_MIN_MACRO_F1", "0.85")
+    monkeypatch.setenv("GRIDSHIELD_MIN_CLASS_RECALL", "0.80")
+
+    result = agents.evaluation_report_node(_valid_state())
 
     report_path = tmp_path / "evaluation_candidate-v1.json"
-
     assert report_path.exists()
+
     saved = json.loads(report_path.read_text(encoding="utf-8"))
 
-    assert saved["evaluation_status"] == "pending_policy"
-    assert saved["confusion_matrix"] == state["confusion_matrix"]
-    assert saved["metrics"] == state["evaluation_metrics"]
-    assert result["evaluation_report_path"] == str(report_path)
-    assert result["audit_events"][-1]["event_type"] == (
-        "evaluation_report_created"
+    assert result["evaluation_status"] == "passed"
+    assert saved["evaluation_status"] == "passed"
+    assert saved["metrics"]["accuracy"] == 1.0
+    assert saved["reasons"] == []
+
+
+def test_evaluation_report_fails_when_accuracy_is_too_low(
+    tmp_path, monkeypatch
+):
+    import gridshield.agents as agents
+
+    monkeypatch.setattr(agents, "REPORT_DIR", tmp_path)
+    monkeypatch.setenv("GRIDSHIELD_MIN_ACCURACY", "0.90")
+
+    state = _valid_state()
+    state["evaluation_metrics"]["accuracy"] = 0.80
+
+    result = agents.evaluation_report_node(state)
+
+    assert result["evaluation_status"] == "failed"
+    assert any(
+        "Accuracy is below" in reason
+        for reason in result["evaluation_report"]["reasons"]
     )
 
 
-def test_evaluation_report_does_not_approve_deployment(tmp_path, monkeypatch):
+def test_evaluation_report_fails_when_a_class_recall_is_too_low(
+    tmp_path, monkeypatch
+):
+    import gridshield.agents as agents
+
+    monkeypatch.setattr(agents, "REPORT_DIR", tmp_path)
+    monkeypatch.setenv("GRIDSHIELD_MIN_CLASS_RECALL", "0.80")
+
+    state = _valid_state()
+    state["evaluation_metrics"]["recall_per_class"]["1"] = 0.50
+
+    result = agents.evaluation_report_node(state)
+
+    assert result["evaluation_status"] == "failed"
+    assert any(
+        "Recall for class 1 is below" in reason
+        for reason in result["evaluation_report"]["reasons"]
+    )
+
+
+def test_evaluation_report_fails_when_class_is_missing(
+    tmp_path, monkeypatch
+):
     import gridshield.agents as agents
 
     monkeypatch.setattr(agents, "REPORT_DIR", tmp_path)
 
-    result = evaluation_report_node({
-        "evaluation_status": "failed",
-        "evaluation_metrics": {},
-        "confusion_matrix": [],
-        "evaluation_class_labels": [],
-        "audit_events": [],
-    })
+    state = _valid_state()
+    state["evaluation_class_labels"] = [0, 1]
 
-    assert result["evaluation_report"]["evaluation_status"] == "failed"
-    assert "deployment_approval_status" not in result
+    result = agents.evaluation_report_node(state)
+
+    assert result["evaluation_status"] == "failed"
+    assert any(
+        "must cover classes 0, 1, and 2" in reason
+        for reason in result["evaluation_report"]["reasons"]
+    )

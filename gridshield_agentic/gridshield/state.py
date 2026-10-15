@@ -49,7 +49,7 @@ class GridShieldState(TypedDict, total=False):
     audit_events: list[dict[str, Any]]
     errors: list[str]
     
-    
+    dataset_validation_status: str
     repository_inserted: bool
     repository_status: str
     notification_status: str

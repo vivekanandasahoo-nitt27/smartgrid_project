@@ -171,6 +171,30 @@ DASHBOARD_PAGE = '''<!doctype html>
     </section>
 
     <section>
+        <h2>Candidate model deployment approval queue ({{ deployments|length }})</h2>
+        <p class="muted">Only candidates with a passing evaluation and a live approval interrupt are listed. Approval records consent only; it does not activate or replace the current model.</p>
+        {% if deployments %}
+            {% for item in deployments %}
+                <article>
+                    <h3>Candidate {{ item.candidate_model_version }}</h3>
+                    <p>Evaluation: <strong>{{ item.evaluation_status }}</strong></p>
+                    <p>Source workflow event: {{ item.event_id }}</p>
+                    <p>Accuracy: {{ item.metrics.accuracy if item.metrics and item.metrics.accuracy is defined else 'n/a' }}</p>
+                    <p>Macro F1: {{ item.metrics.macro_average.f1_score if item.metrics and item.metrics.macro_average and item.metrics.macro_average.f1_score is defined else 'n/a' }}</p>
+                    <p>Evaluation report: {{ item.report_path }}</p>
+                    <form method="post" action="{{ url_for('deployment_decision', candidate_version=item.candidate_model_version) }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button name="decision" value="approved">Approve candidate (no activation)</button>
+                        <button name="decision" value="rejected">Reject candidate</button>
+                    </form>
+                </article>
+            {% endfor %}
+        {% else %}
+            <p class="muted">No evaluated candidates are currently waiting for deployment approval.</p>
+        {% endif %}
+    </section>
+
+    <section>
         <h2>Data admission queue ({{ admissions|length }})</h2>
 
         {% if admissions %}
@@ -230,6 +254,111 @@ DASHBOARD_PAGE = '''<!doctype html>
 </body>
 </html>'''
 
+
+
+OFFICER_NAV = """
+<nav>
+  <a href="/dashboard">Home</a> |
+  <a href="/reviews">Attack review</a> |
+  <a href="/admissions">Data admission</a> |
+  <a href="/deployments">Model deployment approval</a> |
+  <a href="/investigate">Investigation &amp; plots</a>
+</nav>
+<hr>
+"""
+
+
+
+ATTACK_REVIEWS_PAGE = """
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>GridShield — Attack Review</title></head>
+<body>
+<h1>GridShield — Attack Review</h1>
+<p>Officer: <strong>{{ username }}</strong></p>
+""" + OFFICER_NAV + """
+<p>Pending attack reviews: {{ reviews|length }}</p>
+{% for item in reviews %}
+  <article>
+    <h3>Event {{ item.event_id }}</h3>
+    <p>Attack probability: {{ "%.2f"|format(item.attack_probability) }}</p>
+    <p>Route: {{ item.confidence_route }}</p>
+    <details><summary>Measurements</summary>
+      <pre>{{ item.measurements|tojson(indent=2) }}</pre>
+    </details>
+    {% for decision in ["confirmed_attack", "not_attack", "unresolved", "pending_review"] %}
+      <form method="post" action="{{ url_for('review_event', event_id=item.event_id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button name="decision" value="{{ decision }}">{{ decision }}</button>
+      </form>
+    {% endfor %}
+  </article>
+{% else %}
+  <p>No incidents are awaiting attack verification.</p>
+{% endfor %}
+</body></html>
+"""
+
+DATA_ADMISSIONS_PAGE = """
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>GridShield — Data Admission</title></head>
+<body>
+<h1>GridShield — Data Admission</h1>
+<p>Officer: <strong>{{ username }}</strong></p>
+""" + OFFICER_NAV + """
+<p>Pending admissions: {{ admissions|length }}</p>
+{% for item in admissions %}
+  <article>
+    <h3>Event {{ item.event_id }}</h3>
+    <p>Confirmed attack · Probability {{ "%.2f"|format(item.attack_probability) }}</p>
+    <details><summary>Measurements</summary>
+      <pre>{{ item.measurements|tojson(indent=2) }}</pre>
+    </details>
+    {% for decision in ["approved", "rejected"] %}
+      <form method="post" action="{{ url_for('admission_event', event_id=item.event_id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button name="decision" value="{{ decision }}">{{ decision }}</button>
+      </form>
+    {% endfor %}
+  </article>
+{% else %}
+  <p>No incidents are awaiting data admission.</p>
+{% endfor %}
+</body></html>
+"""
+
+DEPLOYMENTS_PAGE = """
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>GridShield — Model Deployment Approval</title></head>
+<body>
+<h1>GridShield — Model Deployment Approval</h1>
+<p>Officer: <strong>{{ username }}</strong></p>
+""" + OFFICER_NAV + """
+<p>Only candidates with a passing evaluation and a live approval interrupt are listed.
+Approval does not activate or replace the current model.</p>
+<p>Pending candidates: {{ deployments|length }}</p>
+{% for item in deployments %}
+  <article>
+    <h3>Candidate {{ item.candidate_model_version }}</h3>
+    <p>Evaluation: {{ item.evaluation_status }}</p>
+    <p>Source event: {{ item.event_id }}</p>
+    <p>Accuracy: {{ item.metrics.accuracy if item.metrics and item.metrics.accuracy is defined else 'n/a' }}</p>
+    <p>Evaluation report: {{ item.report_path }}</p>
+    <form method="post" action="{{ url_for('deployment_decision', candidate_version=item.candidate_model_version) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button name="decision" value="approved">Approve candidate (no activation)</button>
+      <button name="decision" value="rejected">Reject candidate</button>
+    </form>
+  </article>
+{% else %}
+  <p>No evaluated candidates are currently waiting for deployment approval.</p>
+{% endfor %}
+</body></html>
+"""
+
+
 # Keep the pool/checkpointer alive for the complete Flask process lifetime.
 _graph = None
 _graph_context = None
@@ -279,6 +408,86 @@ def _pending_interrupt(graph, event_id, expected_type):
             if payload.get("event_id") == event_id and payload.get("request_type") == expected_type:
                 return config
     abort(409, description="This event has no matching active workflow approval interrupt.")
+
+
+def _pending_deployment_candidates(graph):
+    """Discover only passing reports whose LangGraph thread is paused for approval."""
+    import json
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parent
+    report_dir = project_root / "reports"
+    candidate_dir = (project_root / "artifacts" / "candidates").resolve()
+    if not report_dir.exists():
+        return []
+
+    pending = []
+    for report_path in sorted(report_dir.glob("evaluation_*.json"), reverse=True):
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            version = report.get("candidate_model_version")
+            event_id = report.get("event_id")
+            if (report.get("evaluation_status") != "passed" or
+                    not isinstance(version, str) or not version or
+                    not isinstance(event_id, str) or not event_id):
+                continue
+            model_raw = report.get("candidate_model_path")
+            features_raw = report.get("candidate_feature_columns_path")
+            if not model_raw or not features_raw:
+                continue
+            model_path = Path(model_raw).resolve()
+            features_path = Path(features_raw).resolve()
+            if (candidate_dir not in model_path.parents or
+                    candidate_dir not in features_path.parents or
+                    not model_path.is_file() or not features_path.is_file()):
+                continue
+            try:
+                _pending_interrupt(graph, event_id, "model_deployment")
+            except Exception:
+                continue
+            report["report_path"] = str(report_path)
+            pending.append(report)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            app.logger.warning("Skipping invalid evaluation report: %s", report_path)
+    return pending
+
+
+def _validated_candidate_report(candidate_version, graph):
+    """Resolve a candidate by version and revalidate policy, paths, and paused interrupt."""
+    import json
+    from pathlib import Path
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", candidate_version or ""):
+        abort(400, description="Invalid candidate version.")
+    project_root = Path(__file__).resolve().parents[1]
+    report_dir = project_root / "reports"
+    candidate_dir = (project_root / "artifacts" / "candidates").resolve()
+    matches = []
+    for report_path in report_dir.glob("evaluation_*.json") if report_dir.exists() else []:
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            if report.get("candidate_model_version") == candidate_version:
+                matches.append((report_path, report))
+        except (OSError, ValueError, TypeError):
+            continue
+    if len(matches) != 1:
+        abort(404, description="Candidate report was not found or is ambiguous.")
+    report_path, report = matches[0]
+    report["report_path"] = str(report_path)
+    if report.get("evaluation_status") != "passed":
+        abort(409, description="Only candidates that passed evaluation can be approved.")
+    event_id = report.get("event_id")
+    if not isinstance(event_id, str) or not event_id:
+        abort(409, description="Candidate report has no workflow event identity.")
+    for key in ("candidate_model_path", "candidate_feature_columns_path"):
+        raw = report.get(key)
+        if not raw:
+            abort(409, description="Candidate artifacts are missing from the report.")
+        path = Path(raw).resolve()
+        if candidate_dir not in path.parents or not path.is_file():
+            abort(409, description="Candidate artifacts are missing or outside the candidate directory.")
+    config = _pending_interrupt(graph, event_id, "model_deployment")
+    return report, event_id, config
 
 
 def _numeric_measurement_keys(events):
@@ -662,10 +871,50 @@ def dashboard():
         _, repository = _services()
         reviews = repository.list_pending_reviews()
         admissions = repository.list_pending_admissions()
+        graph, _ = _services()
+        deployments = _pending_deployment_candidates(graph)
     except Exception:
         app.logger.exception("Unable to load GridShield officer queues")
         abort(503, description="Approval queues are temporarily unavailable. Check server logs.")
-    return render_template_string(DASHBOARD_PAGE, username=session.get("officer_username", ""), csrf_token=session["csrf_token"], reviews=reviews, admissions=admissions, error=error, message=message)
+    return render_template_string(DASHBOARD_PAGE, username=session.get("officer_username", ""), csrf_token=session["csrf_token"], reviews=reviews, admissions=admissions, deployments=deployments, error=error, message=message)
+
+
+
+@app.route("/reviews", methods=["GET"])
+@login_required
+def attack_reviews_page():
+    _, repository = _services()
+    return render_template_string(
+        ATTACK_REVIEWS_PAGE,
+        username=session.get("officer_username", ""),
+        csrf_token=session["csrf_token"],
+        reviews=repository.list_pending_reviews(),
+    )
+
+
+@app.route("/admissions", methods=["GET"])
+@login_required
+def admissions_page():
+    _, repository = _services()
+    return render_template_string(
+        DATA_ADMISSIONS_PAGE,
+        username=session.get("officer_username", ""),
+        csrf_token=session["csrf_token"],
+        admissions=repository.list_pending_admissions(),
+    )
+
+
+@app.route("/deployments", methods=["GET"])
+@login_required
+def deployments_page():
+    graph, _ = _services()
+    return render_template_string(
+        DEPLOYMENTS_PAGE,
+        username=session.get("officer_username", ""),
+        csrf_token=session["csrf_token"],
+        deployments=_pending_deployment_candidates(graph),
+    )
+
 
 
 @app.route("/investigate", methods=["GET"])
@@ -810,6 +1059,40 @@ def admission_event(event_id):
     from langgraph.types import Command
     graph.invoke(Command(resume={"decision": decision, "officer_username": session["officer_username"]}), config=config)
     return redirect(url_for("dashboard", message="Data-admission decision recorded."))
+
+
+@app.route("/deployment/<candidate_version>", methods=["POST"])
+@login_required
+def deployment_decision(candidate_version):
+    if not valid_csrf_token():
+        abort(400, description="Invalid CSRF token.")
+    decision = request.form.get("decision", "")
+    if decision not in {"approved", "rejected"}:
+        abort(400, description="Invalid deployment decision.")
+
+    graph, repository = _services()
+    report, event_id, config = _validated_candidate_report(candidate_version, graph)
+
+    # Persist the officer decision before resuming the workflow. If the resume
+    # fails, the audit record still captures the attempted decision.
+    repository.record_model_deployment_decision(
+        candidate_version=candidate_version,
+        event_id=event_id,
+        decision=decision,
+        officer_username=session["officer_username"],
+        thread_id=event_id,
+        evaluation_report_path=report.get("report_path") or str(report.get("evaluation_report_path", "")),
+    )
+    from langgraph.types import Command
+    graph.invoke(
+        Command(resume={"decision": decision, "officer_username": session["officer_username"]}),
+        config=config,
+    )
+    message = (
+        "Candidate approval recorded. The active model was NOT changed; deployment and rollback remain unimplemented."
+        if decision == "approved" else "Candidate rejected. The active model was not changed."
+    )
+    return redirect(url_for("dashboard", message=message))
 
 
 @app.route("/logout", methods=["POST"])

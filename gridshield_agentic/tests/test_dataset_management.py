@@ -4,18 +4,29 @@ import pytest
 from gridshield.agents import dataset_management_node
 
 
+import joblib
+
 def valid_state():
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parents[1]
+    feature_path = project_root / "artifacts" / "feature_columns3.pkl"
+    feature_columns = joblib.load(feature_path)
+
     return {
         "event_id": "dataset-001",
         "human_review_status": "confirmed_attack",
         "human_verified_attack": True,
         "data_admission_status": "approved",
+        "attack_probability": 0.95,
+        "confidence_route": "human_review",
         "candidate_sample": {
             "event_id": "dataset-001",
             "measurements": {
-                "voltageMU1": 0.75,
-                "frequencyMU1": 50.0,
+                feature: 1.0 for feature in feature_columns
             },
+            "attack_probability": 0.95,
+            "confidence_route": "human_review",
         },
         "sample_eligible": False,
         "audit_events": [],
