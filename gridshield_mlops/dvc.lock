@@ -1,0 +1,120 @@
+schema: '2.0'
+stages:
+  validate:
+    cmd: python -m src.validate_data
+    deps:
+    - path: data/baseline_split/X_train.csv
+      hash: md5
+      md5: fb80518e6f2ba0847da905a3722914c9
+      size: 22794676
+    - path: data/baseline_split/y_train.csv
+      hash: md5
+      md5: b364ff582cc540dbb8e9c95f8fac2e08
+      size: 48534
+    - path: data/evaluation/X_test.csv
+      hash: md5
+      md5: 53b9a018211dbed2e66fc055b3cbfb6a
+      size: 5699141
+    - path: data/evaluation/y_test.csv
+      hash: md5
+      md5: 5a25287207065e3f26676ea7b625d1ef
+      size: 12138
+    - path: src/validate_data.py
+      hash: md5
+      md5: 7649fc604fbabab5b50c1cbdd36f2577
+      size: 3187
+    outs:
+    - path: reports/data_validation.json
+      hash: md5
+      md5: 47524425d1018acf217290799883f4b8
+      size: 1853
+  train:
+    cmd: python -m src.train
+    deps:
+    - path: data/baseline_split/X_train.csv
+      hash: md5
+      md5: fb80518e6f2ba0847da905a3722914c9
+      size: 22794676
+    - path: data/baseline_split/y_train.csv
+      hash: md5
+      md5: b364ff582cc540dbb8e9c95f8fac2e08
+      size: 48534
+    - path: reports/data_validation.json
+      hash: md5
+      md5: 47524425d1018acf217290799883f4b8
+      size: 1853
+    - path: src/common.py
+      hash: md5
+      md5: 6cb1fa8d4be2d9e55b43032a5d7935bd
+      size: 1421
+    - path: src/train.py
+      hash: md5
+      md5: 2ab9b42f9418229d72e7fabdd14053e0
+      size: 2530
+    params:
+      params.yaml:
+        random_forest:
+          n_estimators: 200
+          min_samples_split: 2
+          min_samples_leaf: 1
+          max_features: sqrt
+          max_depth:
+          criterion: gini
+          bootstrap: true
+          random_state: 42
+          n_jobs: -1
+    outs:
+    - path: artifacts/candidates/candidate_model.joblib
+      hash: md5
+      md5: 84613242f017a2fe28629fed02993dd0
+      size: 4874033
+    - path: artifacts/candidates/feature_columns.json
+      hash: md5
+      md5: 7f44bcdfeb4ee4dbd419305c76c9dc6c
+      size: 1330
+    - path: reports/training_metadata.json
+      hash: md5
+      md5: 8dbd3a9a524df65f02c021cbe291c9f6
+      size: 631
+  evaluate:
+    cmd: python -m src.evaluate
+    deps:
+    - path: artifacts/candidates/candidate_model.joblib
+      hash: md5
+      md5: 84613242f017a2fe28629fed02993dd0
+      size: 4874033
+    - path: artifacts/candidates/feature_columns.json
+      hash: md5
+      md5: 7f44bcdfeb4ee4dbd419305c76c9dc6c
+      size: 1330
+    - path: data/evaluation/X_test.csv
+      hash: md5
+      md5: 53b9a018211dbed2e66fc055b3cbfb6a
+      size: 5699141
+    - path: data/evaluation/y_test.csv
+      hash: md5
+      md5: 5a25287207065e3f26676ea7b625d1ef
+      size: 12138
+    - path: src/common.py
+      hash: md5
+      md5: 6cb1fa8d4be2d9e55b43032a5d7935bd
+      size: 1421
+    - path: src/evaluate.py
+      hash: md5
+      md5: 873df967279180efde16e76626313d63
+      size: 4159
+    params:
+      params.yaml:
+        policy:
+          min_accuracy: 0.9
+          min_macro_f1: 0.85
+          min_class_recall: 0.8
+    outs:
+    - path: reports/evaluation_metrics.json
+      hash: md5
+      md5: 991380853b477a37b4152527252a1a82
+      size: 175
+    - path: reports/evaluation_report.json
+      hash: md5
+      md5: 79556db7c66dad6ba7ebec99d1338180
+      size: 2383

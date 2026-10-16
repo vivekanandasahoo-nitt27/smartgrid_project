@@ -1,0 +1,43 @@
+stages:
+  validate:
+    cmd: python -m src.validate_data
+    deps:
+      - src/validate_data.py
+      - data/baseline_split/X_train.csv
+      - data/baseline_split/y_train.csv
+      - data/evaluation/X_test.csv
+      - data/evaluation/y_test.csv
+    outs:
+      - reports/data_validation.json
+  train:
+    cmd: python -m src.train
+    deps:
+      - src/train.py
+      - src/common.py
+      - data/baseline_split/X_train.csv
+      - data/baseline_split/y_train.csv
+      - reports/data_validation.json
+    params:
+      - params.yaml:
+          - random_forest
+    outs:
+      - artifacts/candidates/candidate_model.joblib
+      - artifacts/candidates/feature_columns.json
+      - reports/training_metadata.json
+  evaluate:
+    cmd: python -m src.evaluate
+    deps:
+      - src/evaluate.py
+      - src/common.py
+      - data/evaluation/X_test.csv
+      - data/evaluation/y_test.csv
+      - artifacts/candidates/candidate_model.joblib
+      - artifacts/candidates/feature_columns.json
+    params:
+      - params.yaml:
+          - policy
+    metrics:
+      - reports/evaluation_metrics.json:
+          cache: false
+    outs:
+      - reports/evaluation_report.json
