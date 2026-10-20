@@ -1,0 +1,29 @@
+ .dvcignore                                  |   3 [32m+[m
+ .env.example                                |   4 [32m+[m
+ .gitignore                                  |  31 [32m+++++++[m
+ README.md                                   |  51 [32m+++++++++++[m
+ artifacts/candidates/.gitkeep               |   0
+ data/approved_postgres/approved_samples.csv |   1 [32m+[m
+ data/approved_postgres/manifest.json        |  82 [32m+++++++++++++++++[m
+ data/baseline_split/.gitignore              |   2 [32m+[m
+ data/baseline_split/.gitkeep                |   0
+ data/baseline_split/X_train.csv.dvc         |   5 [32m+[m
+ data/baseline_split/y_train.csv.dvc         |   5 [32m+[m
+ data/evaluation/.gitignore                  |   2 [32m+[m
+ data/evaluation/.gitkeep                    |   0
+ data/evaluation/X_test.csv.dvc              |   5 [32m+[m
+ data/evaluation/y_test.csv.dvc              |   5 [32m+[m
+ dvc.lock                                    | 136 [32m++++++++++++++++++++++++++++[m
+ dvc.yaml                                    |  47 [32m++++++++++[m
+ params.yaml                                 |  16 [32m++++[m
+ reports/.gitkeep                            |   0
+ requirements.txt                            |   7 [32m++[m
+ scripts/inspect_postgres.py                 |  90 [32m++++++++++++++++++[m
+ src/__init__.py                             |   0
+ src/common.py                               |  39 [32m++++++++[m
+ src/evaluate.py                             |  69 [32m++++++++++++++[m
+ src/snapshot_approved_samples.py            |  90 [32m++++++++++++++++++[m
+ src/train.py                                |  78 [32m++++++++++++++++[m
+ src/train.py.backup                         |  52 [32m+++++++++++[m
+ src/validate_data.py                        |  61 [32m+++++++++++++[m
+ 28 files changed, 881 insertions(+)

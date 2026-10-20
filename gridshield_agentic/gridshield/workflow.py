@@ -13,6 +13,13 @@ def choose_confidence_route(state: GridShieldState) -> str:
     return state["confidence_route"]
 
 
+
+def choose_start_route(state: GridShieldState) -> str:
+    if state.get("workflow_type") == "mlops_candidate_review":
+        return "external_candidate"
+    return "monitoring"
+
+
 def choose_after_event_report(state: GridShieldState) -> str:
     """Only uncertain cases (0.30 <= P(attack) < 0.70) enter officer review."""
     if state.get("confidence_route") == "human_review":
@@ -126,12 +133,25 @@ def build_graph(checkpointer=None):
         "notify_data_admission",
         communication.data_admission_notification_node,
     )
+    graph.add_node(
+    "notify_model_review",
+    communication.model_review_notification_node,
+    )
 
     # -----------------------------------------------------
     # Initial measurement flow
     # -----------------------------------------------------
 
-    graph.add_edge(START, "grid_monitoring")
+    graph.add_conditional_edges(
+    START,
+    choose_start_route,
+    {
+        "monitoring": "grid_monitoring",
+        "external_candidate": "notify_model_review",
+    },
+)
+
+    graph.add_edge("notify_model_review", "deployment_approval")
     graph.add_edge("grid_monitoring", "classification")
     graph.add_edge("classification", "confidence_monitor")
 

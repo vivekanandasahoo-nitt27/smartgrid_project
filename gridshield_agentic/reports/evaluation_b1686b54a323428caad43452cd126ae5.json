@@ -1,0 +1,110 @@
+{
+  "candidate_id": "b1686b54a323428caad43452cd126ae5",
+  "mlflow_run_id": "b1686b54a323428caad43452cd126ae5",
+  "evaluated_at_utc": "2026-10-20T13:13:05.138610+00:00",
+  "evaluation_status": "passed",
+  "deployment_authorized": false,
+  "policy": {
+    "min_accuracy": 0.9,
+    "min_macro_f1": 0.85,
+    "min_class_recall": 0.8
+  },
+  "metrics": {
+    "accuracy": 0.97675568743818,
+    "macro_f1": 0.9819097304937515,
+    "healthy_recall": 0.9986007462686567,
+    "attack_recall": 0.958345910051313,
+    "fault_recall": 1.0,
+    "macro_average": {
+      "f1_score": 0.9819097304937515
+    }
+  },
+  "per_class": {
+    "healthy": {
+      "label": 0,
+      "precision": 0.9394471259324265,
+      "recall": 0.9986007462686567,
+      "f1": 0.968121184716256,
+      "support": 2144
+    },
+    "attack": {
+      "label": 1,
+      "precision": 0.9993704752911552,
+      "recall": 0.958345910051313,
+      "f1": 0.9784283513097073,
+      "support": 3313
+    },
+    "fault": {
+      "label": 2,
+      "precision": 0.9983606557377049,
+      "recall": 1.0,
+      "f1": 0.9991796554552912,
+      "support": 609
+    }
+  },
+  "confusion_matrix_labels": [
+    0,
+    1,
+    2
+  ],
+  "confusion_matrix": [
+    [
+      2141,
+      2,
+      1
+    ],
+    [
+      138,
+      3175,
+      0
+    ],
+    [
+      0,
+      0,
+      609
+    ]
+  ],
+  "classification_report": {
+    "healthy": {
+      "precision": 0.9394471259324265,
+      "recall": 0.9986007462686567,
+      "f1-score": 0.968121184716256,
+      "support": 2144.0
+    },
+    "attack": {
+      "precision": 0.9993704752911552,
+      "recall": 0.958345910051313,
+      "f1-score": 0.9784283513097073,
+      "support": 3313.0
+    },
+    "fault": {
+      "precision": 0.9983606557377049,
+      "recall": 1.0,
+      "f1-score": 0.9991796554552912,
+      "support": 609.0
+    },
+    "accuracy": 0.97675568743818,
+    "macro avg": {
+      "precision": 0.9790594189870956,
+      "recall": 0.98564888543999,
+      "f1-score": 0.9819097304937515,
+      "support": 6066.0
+    },
+    "weighted avg": {
+      "precision": 0.9780894596081408,
+      "recall": 0.97675568743818,
+      "f1-score": 0.976868670968181,
+      "support": 6066.0
+    }
+  },
+  "evaluation_rows": 6066,
+  "feature_count": 61,
+  "evaluation_data": "fixed holdout split",
+  "note": "Passing evaluation is evidence for review, not permission to deploy.",
+  "candidate_model_version": "mlops-b1686b54a323428caad43452cd126ae5",
+  "event_id": "mlops-b1686b54a323428caad43452cd126ae5",
+  "candidate_model_path": "D:\\PROJECTS\\smartgrid_project\\gridshield_agentic\\artifacts\\candidates\\mlops-b1686b54a323428caad43452cd126ae5\\candidate_model.joblib",
+  "candidate_feature_columns_path": "D:\\PROJECTS\\smartgrid_project\\gridshield_agentic\\artifacts\\candidates\\mlops-b1686b54a323428caad43452cd126ae5\\feature_columns.json",
+  "training_run_id": "b1686b54a323428caad43452cd126ae5",
+  "source_evaluation_report": "D:\\PROJECTS\\smartgrid_project\\gridshield_mlops\\reports\\evaluation_report.json"
+}

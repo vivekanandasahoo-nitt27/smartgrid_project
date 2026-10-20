@@ -16,6 +16,9 @@ stages:
       - src/common.py
       - data/baseline_split/X_train.csv
       - data/baseline_split/y_train.csv
+      - data/evaluation/X_test.csv
+      - data/approved_postgres/approved_samples.csv
+      - data/approved_postgres/manifest.json
       - reports/data_validation.json
     params:
       - params.yaml:
@@ -33,6 +36,7 @@ stages:
       - data/evaluation/y_test.csv
       - artifacts/candidates/candidate_model.joblib
       - artifacts/candidates/feature_columns.json
+      - reports/training_metadata.json
     params:
       - params.yaml:
           - policy

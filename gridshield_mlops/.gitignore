@@ -10,3 +10,22 @@ artifacts/candidates/*
 !artifacts/candidates/.gitkeep
 reports/*
 !reports/.gitkeep
+
+# Local MLflow database
+mlflow.db
+mlartifacts/
+
+# Local candidate archives
+artifacts/archive/
+
+# Local candidate archives
+artifacts/archive/
+
+# Local DVC credentials/configuration
+.dvc/config.local
+venv/
+
+# Local credentials and environment
+.dvc/config.local
+venv/
+dvc.yaml.backup

@@ -107,3 +107,61 @@ def data_admission_notification_node(state):
             "status": "awaiting_data_admission_approval",
         },
     )
+
+
+
+def model_review_notification_node(state):
+    """Notify the officer about a trained and evaluated candidate."""
+
+    report = state.get("evaluation_report") or {}
+    version = (
+        state.get("candidate_model_version")
+        or state.get("training_run_id")
+        or "unknown"
+    )
+    status = state.get("evaluation_status", "unknown")
+
+    if status != "passed":
+        return _notification_node(
+            state=state,
+            event_type="candidate_evaluation_failed",
+            subject="GridShield: Candidate evaluation failed",
+            details={
+                "candidate_version": version,
+                "evaluation_status": status,
+                "evaluation_report_path": state.get(
+                    "evaluation_report_path"
+                ),
+                "message": (
+                    "The candidate is not eligible for deployment approval. "
+                    "The current model remains active."
+                ),
+            },
+        )
+
+    return _notification_node(
+        state=state,
+        event_type="model_review_required",
+        subject="GridShield: New model awaits your review",
+        details={
+            "candidate_version": version,
+            "evaluation_status": status,
+            "accuracy": (report.get("metrics") or {}).get("accuracy"),
+            "macro_f1": (
+                (report.get("metrics") or {})
+                .get("macro_average", {})
+                .get("f1_score")
+            ),
+            "model_artifact": state.get("candidate_model_path"),
+            "feature_artifact": state.get(
+                "candidate_feature_columns_path"
+            ),
+            "evaluation_report": state.get("evaluation_report_path"),
+            "message": (
+                "Log in to the GridShield officer portal to inspect "
+                "the candidate and approve or reject it. "
+                "The active model has not been changed."
+            ),
+        },
+    )
+

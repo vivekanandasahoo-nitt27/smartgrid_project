@@ -171,27 +171,9 @@ DASHBOARD_PAGE = '''<!doctype html>
     </section>
 
     <section>
-        <h2>Candidate model deployment approval queue ({{ deployments|length }})</h2>
-        <p class="muted">Only candidates with a passing evaluation and a live approval interrupt are listed. Approval records consent only; it does not activate or replace the current model.</p>
-        {% if deployments %}
-            {% for item in deployments %}
-                <article>
-                    <h3>Candidate {{ item.candidate_model_version }}</h3>
-                    <p>Evaluation: <strong>{{ item.evaluation_status }}</strong></p>
-                    <p>Source workflow event: {{ item.event_id }}</p>
-                    <p>Accuracy: {{ item.metrics.accuracy if item.metrics and item.metrics.accuracy is defined else 'n/a' }}</p>
-                    <p>Macro F1: {{ item.metrics.macro_average.f1_score if item.metrics and item.metrics.macro_average and item.metrics.macro_average.f1_score is defined else 'n/a' }}</p>
-                    <p>Evaluation report: {{ item.report_path }}</p>
-                    <form method="post" action="{{ url_for('deployment_decision', candidate_version=item.candidate_model_version) }}">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                        <button name="decision" value="approved">Approve candidate (no activation)</button>
-                        <button name="decision" value="rejected">Reject candidate</button>
-                    </form>
-                </article>
-            {% endfor %}
-        {% else %}
-            <p class="muted">No evaluated candidates are currently waiting for deployment approval.</p>
-        {% endif %}
+        <h2>Model candidate review</h2>
+        <p class="muted">Review candidate evaluation reports and record an approval or rejection on a dedicated page.</p>
+        <a class="investigate-link" href="{{ url_for('model_review') }}">Open model review workspace ({{ deployments|length }} pending)</a>
     </section>
 
     <section>
@@ -261,6 +243,7 @@ OFFICER_NAV = """
   <a href="/dashboard">Home</a> |
   <a href="/reviews">Attack review</a> |
   <a href="/admissions">Data admission</a> |
+  <a href="/model-review">Model review workspace</a> |
   <a href="/deployments">Model deployment approval</a> |
   <a href="/investigate">Investigation &amp; plots</a>
 </nav>
@@ -328,35 +311,150 @@ DATA_ADMISSIONS_PAGE = """
 </body></html>
 """
 
-DEPLOYMENTS_PAGE = """
+MODEL_REVIEW_PAGE = r"""
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>GridShield — Model Deployment Approval</title></head>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GridShield — Model Review Workspace</title>
+<style>
+:root { color-scheme: light; --ink:#172033; --muted:#637083; --line:#dbe2ec; --surface:#fff; --bg:#f3f6fb; --blue:#2459a9; --green:#087443; --red:#b42318; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.55 Inter,Segoe UI,Arial,sans-serif; }
+header { background:linear-gradient(120deg,#102744,#1f568b); color:white; padding:28px max(22px,calc((100% - 1180px)/2)); }
+header h1 { margin:0 0 5px; font-size:clamp(1.5rem,3vw,2.1rem); }
+header p { margin:0; color:#dbeafe; }
+main { max-width:1180px; margin:24px auto; padding:0 18px 40px; }
+.topbar { display:flex; gap:12px; justify-content:space-between; align-items:center; flex-wrap:wrap; margin-bottom:18px; }
+a { color:var(--blue); }
+.card { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:22px; margin:16px 0; box-shadow:0 5px 18px rgba(18,39,68,.045); }
+.card h2 { margin:0 0 14px; font-size:1.2rem; }
+.candidate-head { display:flex; justify-content:space-between; align-items:flex-start; gap:14px; flex-wrap:wrap; }
+.candidate-id { font-size:1.08rem; font-weight:750; overflow-wrap:anywhere; }
+.badge { display:inline-block; padding:4px 10px; border-radius:999px; font-weight:700; font-size:.82rem; text-transform:uppercase; letter-spacing:.04em; }
+.badge-passed { color:#05603a; background:#d1fadf; }
+.warning { border-left:4px solid #f79009; background:#fffaeb; padding:12px 14px; border-radius:8px; margin:14px 0; }
+.metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; }
+.metric { border:1px solid var(--line); background:#f9fbfe; padding:16px; border-radius:10px; }
+.metric .label { display:block; color:var(--muted); font-size:.88rem; }
+.metric .value { display:block; margin-top:4px; font-size:1.55rem; font-weight:750; font-variant-numeric:tabular-nums; }
+.small { color:var(--muted); font-size:.9rem; overflow-wrap:anywhere; }
+.table-wrap { overflow-x:auto; }
+table { border-collapse:collapse; width:100%; min-width:520px; }
+th,td { padding:10px 12px; text-align:left; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums; }
+th { background:#f3f6fb; font-size:.88rem; }
+.matrix td { text-align:center; font-weight:700; }
+.matrix th:first-child { text-align:left; }
+.report-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,390px),1fr)); gap:16px; }
+.actions { display:flex; gap:12px; flex-wrap:wrap; margin-top:18px; }
+button { border:0; border-radius:8px; padding:11px 17px; font-weight:700; cursor:pointer; }
+button:focus-visible,a:focus-visible { outline:3px solid #84adff; outline-offset:3px; }
+.approve { background:#087443; color:white; }
+.reject { background:#b42318; color:white; }
+.approve:hover { background:#05603a; } .reject:hover { background:#912018; }
+details { margin-top:12px; }
+pre { white-space:pre-wrap; overflow-wrap:anywhere; background:#f6f8fb; border:1px solid var(--line); border-radius:8px; padding:12px; max-height:420px; overflow:auto; }
+.empty { text-align:center; padding:38px 20px; color:var(--muted); }
+@media (max-width:600px) { .card { padding:16px; } header { padding:22px 18px; } .metric .value { font-size:1.3rem; } }
+</style>
+</head>
 <body>
-<h1>GridShield — Model Deployment Approval</h1>
-<p>Officer: <strong>{{ username }}</strong></p>
-""" + OFFICER_NAV + """
-<p>Only candidates with a passing evaluation and a live approval interrupt are listed.
-Approval does not activate or replace the current model.</p>
-<p>Pending candidates: {{ deployments|length }}</p>
-{% for item in deployments %}
-  <article>
-    <h3>Candidate {{ item.candidate_model_version }}</h3>
-    <p>Evaluation: {{ item.evaluation_status }}</p>
-    <p>Source event: {{ item.event_id }}</p>
-    <p>Accuracy: {{ item.metrics.accuracy if item.metrics and item.metrics.accuracy is defined else 'n/a' }}</p>
-    <p>Evaluation report: {{ item.report_path }}</p>
-    <form method="post" action="{{ url_for('deployment_decision', candidate_version=item.candidate_model_version) }}">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button name="decision" value="approved">Approve candidate (no activation)</button>
-      <button name="decision" value="rejected">Reject candidate</button>
-    </form>
-  </article>
-{% else %}
-  <p>No evaluated candidates are currently waiting for deployment approval.</p>
-{% endfor %}
-</body></html>
+<header>
+  <h1>GridShield · Model Review Workspace</h1>
+  <p>Candidate evaluation reports and human approval</p>
+</header>
+<main>
+  <div class="topbar">
+    <span>Authenticated officer: <strong>{{ username }}</strong></span>
+    <a href="{{ url_for('dashboard') }}">← Return to officer dashboard</a>
+  </div>
+  {% if message %}<div class="card" role="status">{{ message }}</div>{% endif %}
+  {% if deployments %}
+    <p class="small">{{ deployments|length }} candidate(s) passed evaluation and have an active human-review interrupt. Passing evaluation is not production authorization.</p>
+    {% for item in deployments %}
+    <article class="card">
+      <div class="candidate-head">
+        <div>
+          <div class="candidate-id">{{ item.candidate_model_version }}</div>
+          <div class="small">Workflow event: {{ item.event_id }}</div>
+          <div class="small">Evaluated at (UTC): {{ item.evaluated_at_utc or 'Not recorded' }}</div>
+        </div>
+        <span class="badge badge-passed">Evaluation {{ item.evaluation_status }}</span>
+      </div>
+      <div class="warning"><strong>Human decision required.</strong> Approval records consent only. It does not activate or replace the current model; safe deployment and rollback are not implemented.</div>
+
+      <section class="metrics" aria-label="Evaluation summary">
+        <div class="metric"><span class="label">Accuracy</span><span class="value">{{ '%.2f'|format((item.metrics.accuracy|float) * 100) if item.metrics and item.metrics.accuracy is defined else 'N/A' }}{% if item.metrics and item.metrics.accuracy is defined %}%{% endif %}</span></div>
+        <div class="metric"><span class="label">Macro F1</span><span class="value">{{ '%.2f'|format((item.metrics.macro_average.f1_score|float) * 100) if item.metrics and item.metrics.macro_average and item.metrics.macro_average.f1_score is defined else 'N/A' }}{% if item.metrics and item.metrics.macro_average and item.metrics.macro_average.f1_score is defined %}%{% endif %}</span></div>
+        <div class="metric"><span class="label">Evaluation rows</span><span class="value">{{ item.evaluation_rows or 'N/A' }}</span></div>
+        <div class="metric"><span class="label">Input features</span><span class="value">{{ item.feature_count or 'N/A' }}</span></div>
+      </section>
+
+      <div class="report-grid">
+        <section>
+          <h2>Per-class performance</h2>
+          <div class="table-wrap">
+            <table><thead><tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1-score</th><th>Support</th></tr></thead><tbody>
+            {% for class_name in ['healthy','attack','fault'] %}
+              {% set cls = (item.classification_report or {}).get(class_name, {}) %}
+              <tr><td>{{ class_name|title }}</td><td>{{ '%.3f'|format(cls.precision|float) if cls.precision is defined else '—' }}</td><td>{{ '%.3f'|format(cls.recall|float) if cls.recall is defined else '—' }}</td><td>{{ '%.3f'|format(cls['f1-score']|float) if cls['f1-score'] is defined else '—' }}</td><td>{{ cls.support|int if cls.support is defined else '—' }}</td></tr>
+            {% endfor %}
+            </tbody></table>
+          </div>
+        </section>
+        <section>
+          <h2>Confusion matrix</h2>
+          <p class="small">Rows = actual class · columns = predicted class · labels 0 healthy, 1 attack, 2 fault</p>
+          <div class="table-wrap">
+            <table class="matrix"><thead><tr><th>Actual \ Predicted</th><th>Healthy (0)</th><th>Attack (1)</th><th>Fault (2)</th></tr></thead><tbody>
+            {% for row in item.confusion_matrix %}
+              <tr><th>{{ ['Healthy (0)','Attack (1)','Fault (2)'][loop.index0] if loop.index0 < 3 else loop.index }}</th>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+            {% else %}<tr><td colspan="4">Confusion matrix not present in report.</td></tr>{% endfor %}
+            </tbody></table>
+          </div>
+        </section>
+      </div>
+
+      <section>
+        <h2>Evaluation policy</h2>
+        <div class="table-wrap"><table><thead><tr><th>Minimum accuracy</th><th>Minimum macro F1</th><th>Minimum class recall</th><th>Evaluation data</th></tr></thead><tbody><tr>
+        <td>{{ item.policy.min_accuracy if item.policy and item.policy.min_accuracy is defined else '—' }}</td>
+        <td>{{ item.policy.min_macro_f1 if item.policy and item.policy.min_macro_f1 is defined else '—' }}</td>
+        <td>{{ item.policy.min_class_recall if item.policy and item.policy.min_class_recall is defined else '—' }}</td>
+        <td>{{ item.evaluation_data or '—' }}</td>
+        </tr></tbody></table></div>
+      </section>
+
+      <section>
+        <h2>Artifacts and report</h2>
+        <p class="small"><strong>Evaluation report:</strong> {{ item.report_path }}</p>
+        <p class="small"><strong>Candidate model:</strong> {{ item.candidate_model_path }}</p>
+        <p class="small"><strong>Feature columns:</strong> {{ item.candidate_feature_columns_path }}</p>
+        {% if item.note %}<p>{{ item.note }}</p>{% endif %}
+        <details><summary>View full classification report (JSON)</summary><pre>{{ item.classification_report|tojson(indent=2) }}</pre></details>
+        <details><summary>View complete evaluation report (JSON)</summary><pre>{{ item|tojson(indent=2) }}</pre></details>
+      </section>
+
+      <form method="post" action="{{ url_for('deployment_decision', candidate_version=item.candidate_model_version) }}" onsubmit="return confirm('Record this human decision for {{ item.candidate_model_version }}? This will not deploy or activate the model.');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="actions">
+          <button class="approve" name="decision" value="approved">Accept candidate (no activation)</button>
+          <button class="reject" name="decision" value="rejected">Reject candidate</button>
+        </div>
+      </form>
+    </article>
+    {% endfor %}
+  {% else %}
+    <section class="card empty"><h2>No pending model candidates</h2><p>There are currently no passing candidates waiting for human review.</p></section>
+  {% endif %}
+</main>
+</body>
+</html>
 """
+
+# Keep the old /deployments URL working, but send users to the dedicated page.
+DEPLOYMENTS_PAGE = MODEL_REVIEW_PAGE
 
 
 # Keep the pool/checkpointer alive for the complete Flask process lifetime.
@@ -459,7 +557,7 @@ def _validated_candidate_report(candidate_version, graph):
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", candidate_version or ""):
         abort(400, description="Invalid candidate version.")
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = Path(__file__).resolve().parent
     report_dir = project_root / "reports"
     candidate_dir = (project_root / "artifacts" / "candidates").resolve()
     matches = []
@@ -907,12 +1005,19 @@ def admissions_page():
 @app.route("/deployments", methods=["GET"])
 @login_required
 def deployments_page():
+    return redirect(url_for("model_review"))
+
+
+@app.route("/model-review", methods=["GET"])
+@login_required
+def model_review():
     graph, _ = _services()
     return render_template_string(
-        DEPLOYMENTS_PAGE,
+        MODEL_REVIEW_PAGE,
         username=session.get("officer_username", ""),
         csrf_token=session["csrf_token"],
         deployments=_pending_deployment_candidates(graph),
+        message=request.args.get("message"),
     )
 
 
@@ -1007,13 +1112,7 @@ def bulk_review_events():
                 Command(resume={"decision": decision, "officer_username": session["officer_username"]}),
                 config=configs[event_id],
             )
-            repository.record_officer_decision(
-                event_id,
-                stage="attack_review",
-                decision=decision,
-                officer_username=session["officer_username"],
-                thread_id=event_id,
-            )
+            
             succeeded.append(event_id)
         except Exception:
             app.logger.exception("Bulk review failed for event %s", event_id)
@@ -1040,7 +1139,7 @@ def review_event(event_id):
     # Resume the validated interrupt first. This stage does not perform dataset
     # persistence; write the durable decision/audit immediately afterward.
     graph.invoke(Command(resume={"decision": decision, "officer_username": session["officer_username"]}), config=config)
-    repository.record_officer_decision(event_id, stage="attack_review", decision=decision, officer_username=session["officer_username"], thread_id=event_id)
+    
     return redirect(url_for("dashboard", message="Attack review decision recorded."))
 
 
@@ -1055,7 +1154,6 @@ def admission_event(event_id):
         abort(400, description="Invalid data-admission decision.")
     graph, repository = _services()
     config = _pending_interrupt(graph, event_id, "data_admission")
-    repository.record_officer_decision(event_id, stage="data_admission", decision=decision, officer_username=session["officer_username"], thread_id=event_id)
     from langgraph.types import Command
     graph.invoke(Command(resume={"decision": decision, "officer_username": session["officer_username"]}), config=config)
     return redirect(url_for("dashboard", message="Data-admission decision recorded."))
@@ -1092,7 +1190,7 @@ def deployment_decision(candidate_version):
         "Candidate approval recorded. The active model was NOT changed; deployment and rollback remain unimplemented."
         if decision == "approved" else "Candidate rejected. The active model was not changed."
     )
-    return redirect(url_for("dashboard", message=message))
+    return redirect(url_for("model_review", message=message))
 
 
 @app.route("/logout", methods=["POST"])
@@ -1105,4 +1203,4 @@ def logout():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    app.run(host="127.0.0.1", port=5001, debug=False)

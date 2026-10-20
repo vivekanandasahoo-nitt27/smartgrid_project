@@ -31,6 +31,14 @@ stages:
   train:
     cmd: python -m src.train
     deps:
+    - path: data/approved_postgres/approved_samples.csv
+      hash: md5
+      md5: d53410363d263371cc9cf2e8225eb15c
+      size: 976
+    - path: data/approved_postgres/manifest.json
+      hash: md5
+      md5: 75db23303c6666cb44a2b88811a8fad8
+      size: 2158
     - path: data/baseline_split/X_train.csv
       hash: md5
       md5: fb80518e6f2ba0847da905a3722914c9
@@ -39,6 +47,10 @@ stages:
       hash: md5
       md5: b364ff582cc540dbb8e9c95f8fac2e08
       size: 48534
+    - path: data/evaluation/X_test.csv
+      hash: md5
+      md5: 53b9a018211dbed2e66fc055b3cbfb6a
+      size: 5699141
     - path: reports/data_validation.json
       hash: md5
       md5: 47524425d1018acf217290799883f4b8
@@ -49,8 +61,8 @@ stages:
       size: 1421
     - path: src/train.py
       hash: md5
-      md5: 2ab9b42f9418229d72e7fabdd14053e0
-      size: 2530
+      md5: 3141c4349f1464ea2f60aa54ccd7e298
+      size: 6314
     params:
       params.yaml:
         random_forest:
@@ -74,8 +86,8 @@ stages:
       size: 1330
     - path: reports/training_metadata.json
       hash: md5
-      md5: 8dbd3a9a524df65f02c021cbe291c9f6
-      size: 631
+      md5: 1a945d4170882f1e5a2948833a166ef5
+      size: 1156
   evaluate:
     cmd: python -m src.evaluate
     deps:
@@ -95,6 +107,10 @@ stages:
       hash: md5
       md5: 5a25287207065e3f26676ea7b625d1ef
       size: 12138
+    - path: reports/training_metadata.json
+      hash: md5
+      md5: 1a945d4170882f1e5a2948833a166ef5
+      size: 1156
     - path: src/common.py
       hash: md5
       md5: 6cb1fa8d4be2d9e55b43032a5d7935bd
@@ -116,5 +132,5 @@ stages:
       size: 175
     - path: reports/evaluation_report.json
       hash: md5
-      md5: 79556db7c66dad6ba7ebec99d1338180
+      md5: 9b09bd18e7d8861ef9ad52b360b9b7fd
       size: 2383

@@ -56,3 +56,4 @@ class GridShieldState(TypedDict, total=False):
     notification_event_type: str
     notification_status_code: int
     notification_error: str
+    workflow_type: str
